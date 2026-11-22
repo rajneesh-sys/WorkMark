@@ -286,7 +286,7 @@ class CompanyOnboardingIntegrationTest {
                         .header("Authorization", bearer(managerToken)))
                 .andExpect(status().isOk())
                 .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath(
-                        "$.data.length()", org.hamcrest.Matchers.is(1)));
+                        "$.data.content.length()", org.hamcrest.Matchers.is(1)));
         mockMvc.perform(get("/api/v1/attendance/employee")
                         .param("employeeId", outsider.getId().toString())
                         .param("from", attendanceDate.toString())

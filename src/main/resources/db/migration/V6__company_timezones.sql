@@ -1,0 +1,2 @@
+ALTER TABLE companies
+    ADD COLUMN time_zone_id VARCHAR(100) NOT NULL DEFAULT 'UTC';

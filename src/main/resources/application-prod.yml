@@ -7,6 +7,17 @@ spring:
     hikari:
       data-source-properties:
         sslmode: ${DB_SSL_MODE:verify-full}
+  mail:
+    host: ${SMTP_HOST}
+    port: ${SMTP_PORT:587}
+    username: ${SMTP_USERNAME:}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: ${SMTP_AUTH:true}
+          starttls:
+            enable: ${SMTP_STARTTLS:true}
   jpa:
     show-sql: false
 logging:
@@ -20,3 +31,5 @@ springdoc:
 app:
   api-docs:
     public: ${SWAGGER_PUBLIC:false}
+  mail:
+    from: ${SMTP_FROM}

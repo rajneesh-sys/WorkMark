@@ -7,6 +7,10 @@ import com.workmark.department.entity.Department;
 import com.workmark.department.repository.DepartmentRepository;
 import com.workmark.employee.repository.EmployeeRepository;
 import org.springframework.http.HttpStatus;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -43,8 +47,17 @@ public class DepartmentService {
     }
 
     @Transactional(readOnly = true)
-    public List<DepartmentView> list(UUID companyId) {
-        return departments.findAllByCompanyIdOrderByDepartmentName(companyId).stream().map(this::view).toList();
+    public Page<DepartmentView> list(UUID companyId, Pageable pageable) {
+        if (pageable.getPageNumber() < 0 || pageable.getPageSize() < 1) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Page must be non-negative and size must be positive");
+        }
+        if (pageable.getPageNumber() < 0 || pageable.getPageSize() < 1) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Page must be non-negative and size must be positive");
+        }
+        Sort sort = pageable.getSort().isSorted() ? pageable.getSort() : Sort.by("departmentName").ascending();
+        if (sort.getOrderFor("id") == null) sort = sort.and(Sort.by("id").ascending());
+        Pageable bounded = PageRequest.of(pageable.getPageNumber(), Math.min(pageable.getPageSize(), 100), sort);
+        return departments.findAllByCompanyId(companyId, bounded).map(this::view);
     }
 
     @Transactional(readOnly = true)

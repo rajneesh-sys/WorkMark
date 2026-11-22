@@ -5,6 +5,7 @@ import com.workmark.auth.dto.ActivateAccountRequest;
 import com.workmark.auth.dto.CreateCompanyAccountRequest;
 import com.workmark.auth.dto.CompanyOnboardingResponse;
 import com.workmark.auth.dto.CompanyRegistrationRequest;
+import com.workmark.auth.dto.PasswordResetConfirmation;
 import com.workmark.auth.entity.UserAccount;
 import com.workmark.auth.entity.UserRole;
 import com.workmark.auth.repository.UserAccountRepository;
@@ -46,7 +47,8 @@ class AuthServiceTest {
     @Mock JwtService jwtService;
     @Mock EmployeeRepository employees;
     @Mock ActivationTokenService activationTokens;
-    @Mock LoginAttemptRateLimiter loginRateLimiter;
+    @Mock LoginRateLimiter loginRateLimiter;
+    @Mock AccountTokenDelivery tokenDelivery;
 
     @Test
     void companyRegistrationCreatesInactiveAdminWithHashedSetupToken() {
@@ -58,8 +60,10 @@ class AuthServiceTest {
         when(users.existsByEmailIgnoreCase("admin@example.com")).thenReturn(false);
         when(companies.save(any(Company.class))).thenAnswer(invocation -> invocation.getArgument(0));
         when(users.save(any(UserAccount.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(tokenDelivery.deliver(eq("admin@example.com"), eq("Admin User"), eq("one-time-secret"),
+                eq(expiry), eq(AccountTokenDelivery.Purpose.PASSWORD_SETUP))).thenReturn("one-time-secret");
 
-        CompanyOnboardingResponse result = service.registerCompany(new CompanyRegistrationRequest(
+        CompanyOnboardingResponse result = service.registerCompany(superAdmin(), new CompanyRegistrationRequest(
                 "Acme", "company@example.com", "123", null, "Admin User", "admin@example.com"));
 
         ArgumentCaptor<UserAccount> adminCaptor = ArgumentCaptor.forClass(UserAccount.class);
@@ -147,19 +151,83 @@ class AuthServiceTest {
     @Test
     void companyAccountEndpointCannotAssignSuperAdminRole() {
         AuthService service = service();
+        UUID companyId = UUID.randomUUID();
 
         var error = assertThrows(com.workmark.common.exception.ApiException.class,
-                () -> service.createCompanyAccount(UUID.randomUUID(),
-                        new CreateCompanyAccountRequest(UserRole.SUPER_ADMIN, null, null, null,
-                                "LongEnoughPassword123")));
+                () -> service.createCompanyAccount(companyId, companyAdmin(companyId),
+                        new CreateCompanyAccountRequest(UserRole.SUPER_ADMIN, null, null, null)));
 
         assertEquals(org.springframework.http.HttpStatus.BAD_REQUEST, error.getStatus());
         verifyNoInteractions(users, employees);
     }
 
+    @Test
+    void companyRegistrationRequiresSuperAdminAtServiceLayer() {
+        var error = assertThrows(com.workmark.common.exception.ApiException.class,
+                () -> service().registerCompany(companyAdmin(UUID.randomUUID()),
+                        new CompanyRegistrationRequest("Acme", "company@example.com", null, null,
+                                "Admin", "admin@example.com")));
+        assertEquals(org.springframework.http.HttpStatus.FORBIDDEN, error.getStatus());
+        verifyNoInteractions(companies, users);
+    }
+
+    @Test
+    void passwordPolicyRejectsBcryptOverflowFromMultibyteInput() {
+        String password = "é".repeat(37);
+        assertThrows(com.workmark.common.exception.ApiException.class,
+                () -> new PasswordPolicy().validate(password));
+    }
+
+    @Test
+    void passwordResetConsumesTokenAndInvalidatesPreviouslyIssuedTokens() {
+        AuthService service = service();
+        UUID companyId = UUID.randomUUID();
+        UserAccount account = new UserAccount(companyId, "Admin", "admin@example.com",
+                "old-hash", UserRole.COMPANY_ADMIN);
+        Instant now = Instant.parse("2026-11-22T12:00:00Z");
+        when(users.findByEmailIgnoreCase("admin@example.com")).thenReturn(java.util.Optional.of(account));
+        when(activationTokens.issue()).thenReturn(
+                new ActivationTokenService.IssuedToken("one-time-reset-token", "reset-token-hash",
+                        now.plusSeconds(1800)));
+        when(tokenDelivery.deliver("admin@example.com", "Admin", "one-time-reset-token",
+                now.plusSeconds(1800), AccountTokenDelivery.Purpose.PASSWORD_RESET))
+                .thenReturn("one-time-reset-token");
+        when(activationTokens.hash("one-time-reset-token")).thenReturn("reset-token-hash");
+        when(users.findForPasswordResetByTokenHash("reset-token-hash"))
+                .thenReturn(java.util.Optional.of(account), java.util.Optional.empty());
+        when(passwordEncoder.encode("NewSecurePassword2026")).thenReturn("new-hash");
+
+        var response = service.requestPasswordReset("ADMIN@example.com");
+        assertEquals("one-time-reset-token", response.developmentToken());
+        int previousVersion = account.getTokenVersion();
+
+        service.resetPassword(new PasswordResetConfirmation("one-time-reset-token", "NewSecurePassword2026"));
+
+        assertEquals("new-hash", account.getPasswordHash());
+        assertEquals(previousVersion + 1, account.getTokenVersion());
+        assertNull(account.getPasswordResetTokenHash());
+        assertNull(account.getPasswordResetExpiresAt());
+        assertThrows(com.workmark.common.exception.ApiException.class,
+                () -> service.resetPassword(new PasswordResetConfirmation(
+                        "one-time-reset-token", "AnotherSecurePassword2026")));
+        verify(passwordEncoder).encode("NewSecurePassword2026");
+        verify(passwordEncoder, never()).encode("AnotherSecurePassword2026");
+    }
+
+    private CurrentUser superAdmin() {
+        return new CurrentUser(UUID.randomUUID(), null, null, "platform@example.com", "hash",
+                UserRole.SUPER_ADMIN, 0);
+    }
+
+    private CurrentUser companyAdmin(UUID companyId) {
+        return new CurrentUser(UUID.randomUUID(), companyId, null, "admin@example.com", "hash",
+                UserRole.COMPANY_ADMIN, 0);
+    }
+
     private AuthService service() {
         return new AuthService(companies, users, passwordEncoder, authenticationManager, jwtService,
-                employees, activationTokens, loginRateLimiter,
-                Clock.fixed(Instant.parse("2026-11-22T12:00:00Z"), ZoneOffset.UTC), 3600);
+                employees, activationTokens, tokenDelivery, loginRateLimiter, new PasswordPolicy(),
+                Clock.fixed(Instant.parse("2026-11-22T12:00:00Z"), ZoneOffset.UTC),
+                java.time.Duration.ofMinutes(30), 3600);
     }
 }

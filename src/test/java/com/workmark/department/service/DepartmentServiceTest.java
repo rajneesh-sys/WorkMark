@@ -10,11 +10,15 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -47,5 +51,20 @@ class DepartmentServiceTest {
 
         assertEquals(HttpStatus.CONFLICT, error.getStatus());
         verify(departments, never()).delete(any(Department.class));
+    }
+
+    @Test
+    void departmentListingCapsPageSizeAndAddsStableSort() {
+        UUID companyId = UUID.randomUUID();
+        var pageable = org.mockito.ArgumentCaptor.forClass(Pageable.class);
+        when(departments.findAllByCompanyId(eq(companyId), any(Pageable.class))).thenReturn(Page.empty());
+        DepartmentService service = new DepartmentService(departments, employees);
+
+        service.list(companyId, PageRequest.of(0, 500));
+
+        verify(departments).findAllByCompanyId(eq(companyId), pageable.capture());
+        assertEquals(100, pageable.getValue().getPageSize());
+        assertEquals("departmentName", pageable.getValue().getSort().getOrderFor("departmentName").getProperty());
+        assertEquals("id", pageable.getValue().getSort().getOrderFor("id").getProperty());
     }
 }

@@ -1,6 +1,7 @@
 package com.workmark.auth.service;
 
 import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Profile;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -15,7 +16,8 @@ import java.util.Locale;
 import java.util.Map;
 
 @Service
-public class LoginAttemptRateLimiter {
+@Profile({"dev", "test"})
+public class LoginAttemptRateLimiter implements LoginRateLimiter {
     private final LoginRateLimitProperties properties;
     private final Clock clock;
     private final Map<String, Bucket> buckets = new HashMap<>();

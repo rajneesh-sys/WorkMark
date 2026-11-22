@@ -28,10 +28,17 @@ public class ActivationTokenService {
     }
 
     public IssuedToken issue() {
+        return issue(timeToLive);
+    }
+
+    public IssuedToken issue(Duration lifetime) {
+        if (lifetime == null || lifetime.isZero() || lifetime.isNegative()) {
+            throw new IllegalArgumentException("Account token lifetime must be positive");
+        }
         byte[] tokenBytes = new byte[32];
         secureRandom.nextBytes(tokenBytes);
         String rawToken = Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes);
-        return new IssuedToken(rawToken, hash(rawToken), clock.instant().plus(timeToLive));
+        return new IssuedToken(rawToken, hash(rawToken), clock.instant().plus(lifetime));
     }
 
     public String hash(String token) {

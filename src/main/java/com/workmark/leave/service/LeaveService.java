@@ -2,21 +2,33 @@ package com.workmark.leave.service;
 
 import com.workmark.auth.entity.UserRole;
 import com.workmark.common.exception.ApiException;
+import com.workmark.company.service.CompanyTimeZoneResolver;
 import com.workmark.employee.entity.Employee;
-import com.workmark.employee.repository.EmployeeRepository;
+import com.workmark.employee.entity.EmployeeStatus;
+import com.workmark.employee.service.EmployeeAccessPolicy;
+import com.workmark.leave.dto.LeaveActionRequest;
 import com.workmark.leave.dto.LeaveApplyRequest;
+import com.workmark.leave.dto.LeaveStatusHistoryView;
 import com.workmark.leave.dto.LeaveView;
+import com.workmark.leave.entity.LeaveHistoryAction;
 import com.workmark.leave.entity.LeaveRequest;
 import com.workmark.leave.entity.LeaveStatus;
 import com.workmark.leave.entity.LeaveType;
+import com.workmark.leave.entity.LeaveStatusHistory;
 import com.workmark.leave.repository.LeaveRequestRepository;
+import com.workmark.leave.repository.LeaveStatusHistoryRepository;
 import com.workmark.security.CurrentUser;
-import com.workmark.employee.service.EmployeeAccessPolicy;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
@@ -24,14 +36,21 @@ import java.util.UUID;
 @Service
 public class LeaveService {
     private final LeaveRequestRepository leaveRequests;
-    private final EmployeeRepository employees;
+    private final LeaveStatusHistoryRepository statusHistory;
     private final EmployeeAccessPolicy accessPolicy;
+    private final LeaveLedgerService ledger;
+    private final CompanyTimeZoneResolver timeZones;
+    private final Clock clock;
 
-    public LeaveService(LeaveRequestRepository leaveRequests, EmployeeRepository employees,
-                        EmployeeAccessPolicy accessPolicy) {
+    public LeaveService(LeaveRequestRepository leaveRequests, LeaveStatusHistoryRepository statusHistory,
+                        EmployeeAccessPolicy accessPolicy, LeaveLedgerService ledger,
+                        CompanyTimeZoneResolver timeZones, Clock clock) {
         this.leaveRequests = leaveRequests;
-        this.employees = employees;
+        this.statusHistory = statusHistory;
         this.accessPolicy = accessPolicy;
+        this.ledger = ledger;
+        this.timeZones = timeZones;
+        this.clock = clock;
     }
 
     @Transactional
@@ -41,82 +60,127 @@ public class LeaveService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "End date must be on or after start date");
         }
         UUID employeeId = resolveEmployee(user, request.employeeId());
-        Employee employee = findEmployeeForUpdate(companyId, user, employeeId);
-        if (employee.getStatus() != com.workmark.employee.entity.EmployeeStatus.ACTIVE) {
+        Employee employee = accessPolicy.findAccessibleForUpdate(companyId, user, employeeId);
+        if (employee.getStatus() != EmployeeStatus.ACTIVE) {
             throw new ApiException(HttpStatus.CONFLICT, "Inactive employees cannot apply for leave");
         }
-        List<LeaveRequest> overlaps = leaveRequests
-                .findAllByCompanyIdAndEmployeeIdAndStatusInAndStartDateLessThanEqualAndEndDateGreaterThanEqual(
+        boolean overlaps = leaveRequests
+                .existsByCompanyIdAndEmployeeIdAndStatusInAndStartDateLessThanEqualAndEndDateGreaterThanEqual(
                         companyId, employeeId, List.of(LeaveStatus.PENDING, LeaveStatus.APPROVED),
                         request.endDate(), request.startDate());
-        if (!overlaps.isEmpty()) {
+        if (overlaps) {
             throw new ApiException(HttpStatus.CONFLICT, "Leave dates overlap an existing pending or approved request");
         }
         BigDecimal days = BigDecimal.valueOf(ChronoUnit.DAYS.between(request.startDate(), request.endDate()) + 1);
         LeaveRequest leave = leaveRequests.save(new LeaveRequest(companyId, employeeId, request.leaveType(),
                 request.startDate(), request.endDate(), days, request.reason()));
+        recordHistory(companyId, leave, null, LeaveStatus.PENDING, user,
+                LeaveHistoryAction.SUBMITTED, request.reason());
         return view(leave);
     }
 
     @Transactional(readOnly = true)
-    public List<LeaveView> employeeRequests(UUID companyId, CurrentUser user, UUID employeeId) {
+    public Page<LeaveView> employeeRequests(UUID companyId, CurrentUser user, UUID employeeId, Pageable pageable) {
         accessPolicy.requireTenant(companyId, user);
         UUID target = resolveEmployee(user, employeeId);
         accessPolicy.findAccessible(companyId, user, target);
-        return leaveRequests.findAllByCompanyIdAndEmployeeIdOrderByCreatedAtDesc(companyId, target)
-                .stream().map(this::view).toList();
+        return leaveRequests.findAllByCompanyIdAndEmployeeIdOrderByCreatedAtDesc(
+                        companyId, target, bounded(pageable, Sort.by("createdAt").descending()))
+                .map(this::view);
     }
 
     @Transactional(readOnly = true)
-    public List<LeaveView> pending(UUID companyId, CurrentUser user) {
+    public Page<LeaveView> pending(UUID companyId, CurrentUser user, Pageable pageable) {
         accessPolicy.requireApprover(companyId, user);
+        Pageable bounded = bounded(pageable, Sort.by("createdAt").ascending());
+        Page<LeaveRequest> requests;
         if (user.getRole() == UserRole.MANAGER) {
             if (user.getEmployeeId() == null) {
                 throw new ApiException(HttpStatus.FORBIDDEN, "Manager account is not linked to an employee");
             }
-            return leaveRequests.findAllForManagerByCompanyAndStatus(
-                            companyId, user.getEmployeeId(), LeaveStatus.PENDING)
-                    .stream().map(this::view).toList();
+            requests = leaveRequests.findAllForManagerByCompanyAndStatus(
+                    companyId, user.getEmployeeId(), LeaveStatus.PENDING, bounded);
+        } else {
+            requests = leaveRequests.findAllByCompanyIdAndStatusOrderByCreatedAtAsc(
+                    companyId, LeaveStatus.PENDING, bounded);
         }
-        List<LeaveRequest> requests =
-                leaveRequests.findAllByCompanyIdAndStatusOrderByCreatedAtAsc(companyId, LeaveStatus.PENDING);
-        return requests.stream().map(this::view).toList();
+        return requests.map(this::view);
     }
 
     @Transactional
-    public LeaveView approve(UUID companyId, CurrentUser user, UUID id) {
+    public LeaveView approve(UUID companyId, CurrentUser user, UUID id, LeaveActionRequest action) {
         accessPolicy.requireApprover(companyId, user);
         LeaveRequest leave = pendingRequest(companyId, id);
-        authorizeApproval(companyId, user, leave);
+        Employee employee = accessibleEmployeeForApproval(companyId, user, leave);
+        if (employee.getStatus() != EmployeeStatus.ACTIVE) {
+            throw new ApiException(HttpStatus.CONFLICT, "Inactive employees' leave cannot be approved");
+        }
+        LeaveStatus previous = leave.getStatus();
+        ledger.consume(companyId, leave.getEmployeeId(), leave.getLeaveType(), leave.getNumberOfDays(),
+                leave.getId(), user.getId(), action.comment());
         leave.approve(user.getId());
+        recordHistory(companyId, leave, previous, leave.getStatus(), user,
+                LeaveHistoryAction.APPROVED, action.comment());
         return view(leave);
     }
 
     @Transactional
-    public LeaveView reject(UUID companyId, CurrentUser user, UUID id) {
+    public LeaveView reject(UUID companyId, CurrentUser user, UUID id, LeaveActionRequest action) {
         accessPolicy.requireApprover(companyId, user);
         LeaveRequest leave = pendingRequest(companyId, id);
-        authorizeApproval(companyId, user, leave);
+        accessibleEmployeeForApproval(companyId, user, leave);
+        LeaveStatus previous = leave.getStatus();
         leave.reject(user.getId());
+        recordHistory(companyId, leave, previous, leave.getStatus(), user,
+                LeaveHistoryAction.REJECTED, action.comment());
         return view(leave);
     }
 
     @Transactional
-    public LeaveView cancel(UUID companyId, CurrentUser user, UUID id) {
+    public LeaveView cancel(UUID companyId, CurrentUser user, UUID id, LeaveActionRequest action) {
         accessPolicy.requireTenant(companyId, user);
         LeaveRequest leave = leaveRequests.findForUpdateByIdAndCompanyId(id, companyId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Leave request not found"));
+        Employee employee = accessPolicy.findAccessibleForUpdate(companyId, user, leave.getEmployeeId());
         boolean companyStaff = user.getRole() == UserRole.COMPANY_ADMIN || user.getRole() == UserRole.HR;
         boolean owner = user.getRole() == UserRole.EMPLOYEE
                 && user.getEmployeeId() != null && user.getEmployeeId().equals(leave.getEmployeeId());
-        if (!companyStaff && !owner) {
+        boolean manager = user.getRole() == UserRole.MANAGER;
+        if (!companyStaff && !owner && !manager) {
             throw new ApiException(HttpStatus.FORBIDDEN, "You cannot cancel this leave request");
         }
-        if (leave.getStatus() != LeaveStatus.PENDING) {
-            throw new ApiException(HttpStatus.CONFLICT, "Only pending leave requests can be cancelled");
+        if (leave.getStatus() != LeaveStatus.PENDING && leave.getStatus() != LeaveStatus.APPROVED) {
+            throw new ApiException(HttpStatus.CONFLICT, "Only pending or approved leave requests can be cancelled");
         }
+        if (leave.getStatus() == LeaveStatus.APPROVED
+                && !leave.getStartDate().isAfter(LocalDate.now(clock.withZone(timeZones.zoneFor(companyId))))) {
+            throw new ApiException(HttpStatus.CONFLICT, "Approved leave can only be cancelled before it starts");
+        }
+        if (leave.getStatus() == LeaveStatus.APPROVED) {
+            ledger.restore(companyId, leave.getEmployeeId(), leave.getLeaveType(), leave.getNumberOfDays(),
+                    leave.getId(), user.getId(), action.comment());
+        }
+        LeaveStatus previous = leave.getStatus();
         leave.cancel();
+        recordHistory(companyId, leave, previous, leave.getStatus(), user,
+                LeaveHistoryAction.CANCELLED, action.comment());
         return view(leave);
+    }
+
+    @Transactional(readOnly = true)
+    public Page<LeaveStatusHistoryView> history(UUID companyId, CurrentUser user,
+                                                UUID leaveRequestId, Pageable pageable) {
+        accessPolicy.requireTenant(companyId, user);
+        LeaveRequest leave = leaveRequests.findByIdAndCompanyId(leaveRequestId, companyId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Leave request not found"));
+        accessPolicy.findAccessible(companyId, user, leave.getEmployeeId());
+        return statusHistory.findAllByLeaveRequestIdAndCompanyIdOrderByActionAtDesc(
+                        leaveRequestId, companyId, bounded(pageable, Sort.by("actionAt").descending()))
+                .map(this::historyView);
+    }
+
+    private Employee accessibleEmployeeForApproval(UUID companyId, CurrentUser user, LeaveRequest leave) {
+        return accessPolicy.findAccessibleForUpdate(companyId, user, leave.getEmployeeId());
     }
 
     private UUID resolveEmployee(CurrentUser user, UUID requestedEmployeeId) {
@@ -137,15 +201,6 @@ public class LeaveService {
         return requestedEmployeeId;
     }
 
-    private void authorizeApproval(UUID companyId, CurrentUser user, LeaveRequest leave) {
-        if (user.getRole() == UserRole.COMPANY_ADMIN || user.getRole() == UserRole.HR) return;
-        if (user.getRole() == UserRole.MANAGER) {
-            var employee = accessPolicy.findAccessibleForUpdate(companyId, user, leave.getEmployeeId());
-            if (user.getEmployeeId() != null && user.getEmployeeId().equals(employee.getManagerId())) return;
-        }
-        throw new ApiException(HttpStatus.FORBIDDEN, "You are not authorized to approve this leave request");
-    }
-
     private LeaveRequest pendingRequest(UUID companyId, UUID id) {
         LeaveRequest leave = leaveRequests.findForUpdateByIdAndCompanyId(id, companyId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Leave request not found"));
@@ -155,13 +210,30 @@ public class LeaveService {
         return leave;
     }
 
-    private Employee findEmployeeForUpdate(UUID companyId, CurrentUser user, UUID employeeId) {
-        return accessPolicy.findAccessibleForUpdate(companyId, user, employeeId);
+    private void recordHistory(UUID companyId, LeaveRequest leave, LeaveStatus previous,
+                               LeaveStatus next, CurrentUser actor, LeaveHistoryAction action, String comment) {
+        statusHistory.save(new LeaveStatusHistory(companyId, leave.getId(), previous, next,
+                actor.getId(), action, comment, clock.instant()));
+    }
+
+    private Pageable bounded(Pageable pageable, Sort defaultSort) {
+        if (pageable.getPageNumber() < 0 || pageable.getPageSize() < 1) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Page must be non-negative and size must be positive");
+        }
+        Sort sort = pageable.getSort().isSorted() ? pageable.getSort() : defaultSort;
+        if (sort.getOrderFor("id") == null) sort = sort.and(Sort.by("id").ascending());
+        return PageRequest.of(pageable.getPageNumber(), Math.min(pageable.getPageSize(), 100),
+                sort);
     }
 
     private LeaveView view(LeaveRequest leave) {
         return new LeaveView(leave.getId(), leave.getCompanyId(), leave.getEmployeeId(), leave.getLeaveType(),
                 leave.getStartDate(), leave.getEndDate(), leave.getNumberOfDays(), leave.getReason(),
                 leave.getStatus(), leave.getApprovedBy(), leave.getCreatedAt());
+    }
+
+    private LeaveStatusHistoryView historyView(LeaveStatusHistory item) {
+        return new LeaveStatusHistoryView(item.getId(), item.getLeaveRequestId(), item.getPreviousStatus(),
+                item.getNewStatus(), item.getActorId(), item.getAction(), item.getComment(), item.getActionAt());
     }
 }

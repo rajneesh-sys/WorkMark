@@ -48,7 +48,7 @@ public class CompanyController {
     public ApiResponse<CompanyOnboardingResponse> register(
             @Valid @RequestBody CompanyRegistrationRequest request) {
         return ApiResponse.ok("Company registered; securely deliver the setup token to its administrator",
-                authService.registerCompany(request));
+                authService.registerCompany(currentTenant.user(), request));
     }
 
     @GetMapping("/me")

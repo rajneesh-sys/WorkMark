@@ -1,12 +1,17 @@
 package com.workmark.auth.controller;
 
 import com.workmark.auth.dto.AuthResponse;
+import com.workmark.auth.dto.AccountInvitationResponse;
 import com.workmark.auth.dto.ActivateAccountRequest;
 import com.workmark.auth.dto.CreateEmployeeAccountRequest;
 import com.workmark.auth.dto.ChangePasswordRequest;
 import com.workmark.auth.dto.CreateCompanyAccountRequest;
 import com.workmark.auth.dto.LoginRequest;
+import com.workmark.auth.dto.PasswordResetConfirmation;
+import com.workmark.auth.dto.PasswordResetRequest;
+import com.workmark.auth.dto.PasswordResetRequestResponse;
 import com.workmark.auth.service.AuthService;
+import com.workmark.auth.service.ClientIpResolver;
 import com.workmark.common.response.ApiResponse;
 import com.workmark.security.CurrentTenant;
 import io.swagger.v3.oas.annotations.Operation;
@@ -28,16 +33,18 @@ import jakarta.servlet.http.HttpServletRequest;
 public class AuthController {
     private final AuthService authService;
     private final CurrentTenant currentTenant;
+    private final ClientIpResolver clientIpResolver;
 
-    public AuthController(AuthService authService, CurrentTenant currentTenant) {
+    public AuthController(AuthService authService, CurrentTenant currentTenant, ClientIpResolver clientIpResolver) {
         this.authService = authService;
         this.currentTenant = currentTenant;
+        this.clientIpResolver = clientIpResolver;
     }
 
     @PostMapping("/login")
     @Operation(summary = "Authenticate with email and password")
     public ApiResponse<AuthResponse> login(@Valid @RequestBody LoginRequest request, HttpServletRequest servletRequest) {
-        return ApiResponse.ok("Login successful", authService.login(request, servletRequest.getRemoteAddr()));
+        return ApiResponse.ok("Login successful", authService.login(request, clientIpResolver.resolve(servletRequest)));
     }
 
     @PostMapping("/activate")
@@ -45,6 +52,22 @@ public class AuthController {
     public ApiResponse<Void> activate(@Valid @RequestBody ActivateAccountRequest request) {
         authService.activateAccount(request);
         return ApiResponse.ok("Account activated; sign in to continue", null);
+    }
+
+    @PostMapping("/password-reset/request")
+    @Operation(summary = "Request a password reset without disclosing whether an account exists")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public ApiResponse<PasswordResetRequestResponse> requestPasswordReset(
+            @Valid @RequestBody PasswordResetRequest request) {
+        return ApiResponse.ok("If the account is eligible, password-reset instructions will be sent",
+                authService.requestPasswordReset(request.email()));
+    }
+
+    @PostMapping("/password-reset/confirm")
+    @Operation(summary = "Set a new password with a one-time reset token")
+    public ApiResponse<Void> resetPassword(@Valid @RequestBody PasswordResetConfirmation request) {
+        authService.resetPassword(request);
+        return ApiResponse.ok("Password reset; sign in again", null);
     }
 
     @PostMapping("/logout")
@@ -65,20 +88,20 @@ public class AuthController {
     @Operation(summary = "Create login credentials for a company employee")
     @ResponseStatus(HttpStatus.CREATED)
     @PreAuthorize("hasAnyRole('COMPANY_ADMIN','HR')")
-    public ApiResponse<AuthResponse.UserView> createEmployeeAccount(
+    public ApiResponse<AccountInvitationResponse> createEmployeeAccount(
             @Valid @RequestBody CreateEmployeeAccountRequest request) {
         return ApiResponse.ok("Employee login account created",
-                authService.createEmployeeAccount(currentTenant.companyId(), request));
+                authService.createEmployeeAccount(currentTenant.companyId(), currentTenant.user(), request));
     }
 
     @PostMapping("/company-account")
     @ResponseStatus(HttpStatus.CREATED)
     @PreAuthorize("hasRole('COMPANY_ADMIN')")
     @Operation(summary = "Create a company HR or manager account")
-    public ApiResponse<AuthResponse.UserView> createCompanyAccount(
+    public ApiResponse<AccountInvitationResponse> createCompanyAccount(
             @Valid @RequestBody CreateCompanyAccountRequest request) {
         return ApiResponse.ok("Company account created",
-                authService.createCompanyAccount(currentTenant.companyId(), request));
+                authService.createCompanyAccount(currentTenant.companyId(), currentTenant.user(), request));
     }
 
     @PostMapping("/password")

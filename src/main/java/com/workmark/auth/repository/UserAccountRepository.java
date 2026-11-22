@@ -22,4 +22,8 @@ public interface UserAccountRepository extends JpaRepository<UserAccount, UUID> 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select u from UserAccount u where u.activationTokenHash = :tokenHash")
     Optional<UserAccount> findForActivationByTokenHash(@Param("tokenHash") String tokenHash);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select u from UserAccount u where u.passwordResetTokenHash = :tokenHash")
+    Optional<UserAccount> findForPasswordResetByTokenHash(@Param("tokenHash") String tokenHash);
 }

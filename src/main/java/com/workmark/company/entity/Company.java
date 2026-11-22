@@ -24,6 +24,8 @@ public class Company extends AuditedEntity {
     private String phone;
     @Column(length = 500)
     private String address;
+    @Column(name = "time_zone_id", nullable = false, length = 100)
+    private String timeZoneId;
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private CompanyStatus status;
@@ -35,6 +37,7 @@ public class Company extends AuditedEntity {
         this.email = email.toLowerCase(Locale.ROOT);
         this.phone = phone;
         this.address = address;
+        this.timeZoneId = "UTC";
         this.status = CompanyStatus.ACTIVE;
     }
 
@@ -43,12 +46,17 @@ public class Company extends AuditedEntity {
     public String getEmail() { return email; }
     public String getPhone() { return phone; }
     public String getAddress() { return address; }
+    public String getTimeZoneId() { return timeZoneId; }
     public CompanyStatus getStatus() { return status; }
     public void update(String name, String email, String phone, String address) {
+        update(name, email, phone, address, timeZoneId);
+    }
+    public void update(String name, String email, String phone, String address, String timeZoneId) {
         this.companyName = name;
         this.email = email.toLowerCase(Locale.ROOT);
         this.phone = phone;
         this.address = address;
+        this.timeZoneId = timeZoneId;
     }
     public void setStatus(CompanyStatus status) { this.status = status; }
 }

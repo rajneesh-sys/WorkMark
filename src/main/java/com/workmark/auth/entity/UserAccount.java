@@ -31,6 +31,10 @@ public class UserAccount extends AuditedEntity {
     private String activationTokenHash;
     @Column(name = "activation_expires_at")
     private Instant activationExpiresAt;
+    @Column(name = "password_reset_token_hash", length = 64)
+    private String passwordResetTokenHash;
+    @Column(name = "password_reset_expires_at")
+    private Instant passwordResetExpiresAt;
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
     private UserRole role;
@@ -61,6 +65,8 @@ public class UserAccount extends AuditedEntity {
     public String getPasswordHash() { return passwordHash; }
     public String getActivationTokenHash() { return activationTokenHash; }
     public Instant getActivationExpiresAt() { return activationExpiresAt; }
+    public String getPasswordResetTokenHash() { return passwordResetTokenHash; }
+    public Instant getPasswordResetExpiresAt() { return passwordResetExpiresAt; }
     public UserRole getRole() { return role; }
     public boolean isActive() { return active; }
     public int getTokenVersion() { return tokenVersion; }
@@ -87,5 +93,14 @@ public class UserAccount extends AuditedEntity {
     public void changePassword(String passwordHash) {
         this.passwordHash = passwordHash;
         invalidateTokens();
+    }
+    public void requirePasswordReset(String tokenHash, Instant expiresAt) {
+        passwordResetTokenHash = tokenHash;
+        passwordResetExpiresAt = expiresAt;
+    }
+    public void resetPassword(String encodedPassword) {
+        changePassword(encodedPassword);
+        passwordResetTokenHash = null;
+        passwordResetExpiresAt = null;
     }
 }

@@ -5,8 +5,8 @@ spring:
     password: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
     hikari:
-    data-source-properties:
-      sslmode: ${DB_SSL_MODE:disable}
+      data-source-properties:
+        sslmode: ${DB_SSL_MODE:disable}
   jpa:
     show-sql: false
 logging:

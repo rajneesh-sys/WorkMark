@@ -55,4 +55,12 @@ public class Attendance extends AuditedEntity {
         checkOutTime = time;
         totalWorkingMinutes = Math.toIntExact(Duration.between(checkInTime, time).toMinutes());
     }
+    public void correct(LocalDate date, Instant checkIn, Instant checkOut, AttendanceStatus correctedStatus) {
+        attendanceDate = date;
+        checkInTime = checkIn;
+        checkOutTime = checkOut;
+        totalWorkingMinutes = checkOut == null
+                ? null : Math.toIntExact(Duration.between(checkIn, checkOut).toMinutes());
+        status = correctedStatus;
+    }
 }

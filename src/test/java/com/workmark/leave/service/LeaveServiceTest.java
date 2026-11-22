@@ -6,16 +6,21 @@ import com.workmark.employee.entity.Employee;
 import com.workmark.employee.repository.EmployeeRepository;
 import com.workmark.employee.service.EmployeeAccessPolicy;
 import com.workmark.leave.dto.LeaveApplyRequest;
+import com.workmark.leave.dto.LeaveActionRequest;
 import com.workmark.leave.entity.LeaveRequest;
 import com.workmark.leave.entity.LeaveStatus;
 import com.workmark.leave.entity.LeaveType;
 import com.workmark.leave.repository.LeaveRequestRepository;
+import com.workmark.leave.repository.LeaveStatusHistoryRepository;
+import com.workmark.company.service.CompanyTimeZoneResolver;
 import com.workmark.security.CurrentUser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -31,6 +36,9 @@ class LeaveServiceTest {
     @Mock LeaveRequestRepository leaves;
     @Mock EmployeeRepository employees;
     @Mock EmployeeAccessPolicy accessPolicy;
+    @Mock LeaveStatusHistoryRepository history;
+    @Mock LeaveLedgerService ledger;
+    @Mock CompanyTimeZoneResolver timeZones;
 
     @Test
     void overlappingPendingOrApprovedLeaveIsRejected() {
@@ -43,8 +51,8 @@ class LeaveServiceTest {
         when(accessPolicy.findAccessibleForUpdate(companyId, user, employeeId)).thenReturn(employee);
         LeaveRequest existing = new LeaveRequest(companyId, employeeId, LeaveType.CASUAL, start,
                 start.plusDays(2), java.math.BigDecimal.valueOf(3), "existing");
-        when(leaves.findAllByCompanyIdAndEmployeeIdAndStatusInAndStartDateLessThanEqualAndEndDateGreaterThanEqual(
-                eq(companyId), eq(employeeId), anyList(), any(), any())).thenReturn(List.of(existing));
+        when(leaves.existsByCompanyIdAndEmployeeIdAndStatusInAndStartDateLessThanEqualAndEndDateGreaterThanEqual(
+                eq(companyId), eq(employeeId), anyList(), any(), any())).thenReturn(true);
         LeaveService service = service();
 
         ApiException error = assertThrows(ApiException.class, () -> service.apply(companyId, user,
@@ -63,8 +71,8 @@ class LeaveServiceTest {
                 null, null, null, start.minusYears(1));
         CurrentUser user = currentUser(companyId, employeeId);
         when(accessPolicy.findAccessibleForUpdate(companyId, user, employeeId)).thenReturn(employee);
-        when(leaves.findAllByCompanyIdAndEmployeeIdAndStatusInAndStartDateLessThanEqualAndEndDateGreaterThanEqual(
-                eq(companyId), eq(employeeId), anyList(), any(), any())).thenReturn(List.of());
+        when(leaves.existsByCompanyIdAndEmployeeIdAndStatusInAndStartDateLessThanEqualAndEndDateGreaterThanEqual(
+                eq(companyId), eq(employeeId), anyList(), any(), any())).thenReturn(false);
         when(leaves.save(any(LeaveRequest.class))).thenAnswer(invocation -> invocation.getArgument(0));
         LeaveService service = service();
 
@@ -91,7 +99,7 @@ class LeaveServiceTest {
         LeaveService service = service();
 
         ApiException error = assertThrows(ApiException.class,
-                () -> service.approve(companyId, manager, leaveId));
+                () -> service.approve(companyId, manager, leaveId, new LeaveActionRequest("not authorized")));
 
         assertEquals(HttpStatus.NOT_FOUND, error.getStatus());
         assertEquals(LeaveStatus.PENDING, leave.getStatus());
@@ -128,10 +136,10 @@ class LeaveServiceTest {
         LeaveService service = service();
 
         ApiException error = assertThrows(ApiException.class,
-                () -> service.employeeRequests(companyId, manager, unrelatedEmployeeId));
+                () -> service.employeeRequests(companyId, manager, unrelatedEmployeeId, PageRequest.of(0, 20)));
 
         assertEquals(HttpStatus.NOT_FOUND, error.getStatus());
-        verify(leaves, never()).findAllByCompanyIdAndEmployeeIdOrderByCreatedAtDesc(any(), any());
+        verify(leaves, never()).findAllByCompanyIdAndEmployeeIdOrderByCreatedAtDesc(any(), any(), any());
     }
 
     @Test
@@ -141,7 +149,7 @@ class LeaveServiceTest {
         LeaveService service = service();
 
         ApiException error = assertThrows(ApiException.class,
-                () -> service.employeeRequests(companyId, employee, UUID.randomUUID()));
+                () -> service.employeeRequests(companyId, employee, UUID.randomUUID(), PageRequest.of(0, 20)));
 
         assertEquals(HttpStatus.FORBIDDEN, error.getStatus());
         verifyNoInteractions(leaves);
@@ -151,14 +159,15 @@ class LeaveServiceTest {
     void managerPendingRequestsUseCompanyAndDirectReportQuery() {
         UUID companyId = UUID.randomUUID();
         CurrentUser manager = currentManager(companyId, UUID.randomUUID());
-        when(leaves.findAllForManagerByCompanyAndStatus(companyId, manager.getEmployeeId(), LeaveStatus.PENDING))
-                .thenReturn(List.of());
+        when(leaves.findAllForManagerByCompanyAndStatus(
+                eq(companyId), eq(manager.getEmployeeId()), eq(LeaveStatus.PENDING), any()))
+                .thenReturn(new PageImpl<>(List.of()));
 
-        service().pending(companyId, manager);
+        service().pending(companyId, manager, PageRequest.of(0, 20));
 
         verify(leaves).findAllForManagerByCompanyAndStatus(
-                companyId, manager.getEmployeeId(), LeaveStatus.PENDING);
-        verify(leaves, never()).findAllByCompanyIdAndStatusOrderByCreatedAtAsc(any(), any());
+                eq(companyId), eq(manager.getEmployeeId()), eq(LeaveStatus.PENDING), any());
+        verify(leaves, never()).findAllByCompanyIdAndStatusOrderByCreatedAtAsc(any(), any(), any());
     }
 
     @Test
@@ -166,12 +175,14 @@ class LeaveServiceTest {
         UUID companyId = UUID.randomUUID();
         CurrentUser hr = new CurrentUser(UUID.randomUUID(), companyId, null,
                 "hr@example.com", "hash", UserRole.HR, 0);
-        when(leaves.findAllByCompanyIdAndStatusOrderByCreatedAtAsc(companyId, LeaveStatus.PENDING))
-                .thenReturn(List.of());
+        when(leaves.findAllByCompanyIdAndStatusOrderByCreatedAtAsc(
+                eq(companyId), eq(LeaveStatus.PENDING), any()))
+                .thenReturn(new PageImpl<>(List.of()));
 
-        service().pending(companyId, hr);
+        service().pending(companyId, hr, PageRequest.of(0, 20));
 
-        verify(leaves).findAllByCompanyIdAndStatusOrderByCreatedAtAsc(companyId, LeaveStatus.PENDING);
+        verify(leaves).findAllByCompanyIdAndStatusOrderByCreatedAtAsc(
+                eq(companyId), eq(LeaveStatus.PENDING), any());
     }
 
     private CurrentUser currentUser(UUID companyId, UUID employeeId) {
@@ -183,6 +194,7 @@ class LeaveServiceTest {
                 "hash", UserRole.MANAGER, 0);
     }
     private LeaveService service() {
-        return new LeaveService(leaves, employees, accessPolicy);
+        return new LeaveService(leaves, history, accessPolicy, ledger, timeZones,
+                java.time.Clock.systemUTC());
     }
 }

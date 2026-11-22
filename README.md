@@ -44,7 +44,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
 
 The production override enables PostgreSQL TLS and requires JDBC `sslmode=verify-full`; the certificate must be valid for the `postgres` service name and trusted by the application's JVM. Keep the database host port unpublished. The application uses a separate database superuser only to initialize the least-privilege app role. For an externally managed database, deploy the application container without the local PostgreSQL service and provide `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, and `DB_SSL_MODE=verify-full` through the deployment platform.
 
-The host-run development profile supports `DB_SSL_MODE=disable` for local PostgreSQL. Production defaults to `verify-full`. Never copy development TLS settings into production.
+The host-run development profile supports `DB_SSL_MODE=disable` for local PostgreSQL. Production defaults to `verify-full`. Production SMTP is configured with `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM`. The Docker image runs as a non-root user; Compose makes the app filesystem read-only, enables a readiness health check, and drops Linux capabilities. `.env` files and local build artifacts are excluded from the Docker context, and `.env.*` is ignored by Git except for `.env.example`. Never copy development TLS settings into production.
 
 ## API and initial Super Admin
 
@@ -71,9 +71,9 @@ Login is `POST /api/v1/auth/login`. Send the returned token as `Authorization: B
 
 ## Company onboarding
 
-Only a logged-in `SUPER_ADMIN` can register a company using `POST /api/v1/companies`. The request contains company details and the first admin's name/email; it does not accept a role or password. The company and inactive `COMPANY_ADMIN` account are committed in one transaction. The response includes a random, one-time password-setup token; only its SHA-256 hash and expiration are stored. Deliver the raw token to the company administrator through a secure channel. It expires after `ACCOUNT_ACTIVATION_TTL` (default 24 hours).
+Only a logged-in `SUPER_ADMIN` can register a company using `POST /api/v1/companies`. The request contains company details and the first admin's name/email; it does not accept a role or password. The company and inactive `COMPANY_ADMIN` account are committed in one transaction. A random, one-time password-setup token is generated; only its SHA-256 hash and expiration are stored. In `dev` and `test`, the token is returned for local use; in `prod`, it is sent to the company administrator using SMTP and omitted from the API response. It expires after `ACCOUNT_ACTIVATION_TTL` (default 24 hours).
 
-The admin sets a password at `POST /api/v1/auth/activate`, then signs in through `/api/v1/auth/login`. Activation is one-time and cannot change the assigned role. There is no public company or Super Admin registration endpoint.
+The admin sets a password at `POST /api/v1/auth/activate`, then signs in through `/api/v1/auth/login`. Activation is one-time and cannot change the assigned role. In `dev` and `test`, the one-time token is returned for local testing; `prod` sends it through SMTP and never returns it in the API response. Password reset uses `POST /api/v1/auth/password-reset/request` and `/api/v1/auth/password-reset/confirm`; production reset requests have a generic response and use the same one-time SMTP delivery flow. There is no public company or Super Admin registration endpoint.
 
 Company administrators and HR can create employee logins using `POST /api/v1/auth/employee-account`. A company administrator can create HR or manager logins at `POST /api/v1/auth/company-account`. `POST /api/v1/auth/password` lets a user change their password; all existing access tokens are invalidated and the user must sign in again.
 
@@ -85,10 +85,12 @@ Company administrators and HR can create employee logins using `POST /api/v1/aut
 | Company | `POST /companies` (Super Admin only), `/companies/me`, `/companies/{id}/status` |
 | Employee | `/employees` |
 | Department | `/departments` |
-| Leave | `/leaves`, `/leaves/pending`, `/leaves/{id}/approve`, `/leaves/{id}/reject`, `/leaves/{id}/cancel` |
-| Attendance | `/attendance/check-in`, `/attendance/check-out`, `/attendance/daily`, `/attendance/summary/monthly` |
+| Leave | `/leaves`, `/leaves/pending`, `/leaves/policies`, `/leaves/balances`, `/leaves/{id}/history`, `/leaves/{id}/approve`, `/leaves/{id}/reject`, `/leaves/{id}/cancel` |
+| Attendance | `/attendance/check-in`, `/attendance/check-out`, `/attendance/daily`, `/attendance/employee`, `/attendance/{id}/corrections`, `/attendance/summary/monthly` |
 
-Employee list APIs accept Spring pageable parameters (`page`, `size`, and `sort`); page size is capped at 100. Department deletion is rejected while employees reference it. Employee and department status values are `ACTIVE` and `INACTIVE`. Leave days are counted as inclusive calendar days; holiday/weekend calendars and half-day policies are intentionally not included. Attendance dates and working minutes use UTC until tenant-specific time zones and shift policies are introduced.
+Employee, department, attendance, leave request, balance ledger and leave history list APIs accept Spring pageable parameters (`page`, `size`, and `sort`); page size is capped at 100. Department deletion is rejected while employees reference it. Employee and department status values are `ACTIVE` and `INACTIVE`. Leave days are counted as inclusive calendar days; holiday/weekend calendars and half-day policies are intentionally not included. Paid leave approvals require an active leave policy and available ledger balance. HR and company administrators can manage policy and allocation; unpaid leave does not consume a balance. Approved future leave cancellation restores its balance and every leave status transition is audited. Carry-forward limits are supported, but non-zero carry-forward expiry is rejected until the ledger can correctly account for consumption across expiring allocation lots.
+
+Attendance check-in uses the company's configured IANA timezone (UTC by default); update it through the company profile. Check-out can close an open check-in from the previous local day. HR and company administrators can correct attendance only with a reason; before/after values are retained in an immutable audit history. Attendance summary totals cover one employee and one calendar month.
 
 ## Tenant and authorization model
 
@@ -106,14 +108,14 @@ Roles:
 
 JWTs are signed with an environment-supplied HMAC secret, expire after a configurable interval, and contain no tenant authority claims. Every request reloads the account and checks its token version and company status. The logout implementation is deliberately stateful: it revokes all access tokens belonging to that account.
 
-Failed logins are temporarily throttled by both servlet-observed source IP and normalized account identifier. Limits are configurable with `LOGIN_RATE_LIMIT_MAX_FAILURES`, `LOGIN_RATE_LIMIT_WINDOW`, `LOGIN_RATE_LIMIT_BASE_BLOCK`, `LOGIN_RATE_LIMIT_MAX_BLOCK`, and `LOGIN_RATE_LIMIT_MAX_TRACKED_KEYS`. Keys are hashed in memory; forwarded IP headers are not trusted. The in-process limiter protects each application instance; production deployments with multiple instances should also enforce a shared rate limit at a trusted gateway/WAF.
+Failed logins are temporarily throttled by both source IP and normalized account identifier. Limits are configurable with `LOGIN_RATE_LIMIT_MAX_FAILURES`, `LOGIN_RATE_LIMIT_WINDOW`, `LOGIN_RATE_LIMIT_BASE_BLOCK`, `LOGIN_RATE_LIMIT_MAX_BLOCK`, and `LOGIN_RATE_LIMIT_MAX_TRACKED_KEYS`. Development and test use an in-memory limiter; production uses PostgreSQL-backed shared buckets with HMAC-hashed identifiers. Forwarded IP headers are ignored unless the immediate proxy is listed in `TRUSTED_PROXY_CIDRS`. Configure `CORS_ALLOWED_ORIGINS` as a comma-separated exact-origin allowlist; it is empty by default and wildcard origins are not supported.
 
 Deactivating an employee deactivates every linked account and increments its token version in the same transaction. Reactivating the employee record does not reactivate its account; an authorized account-recovery/reactivation workflow must be completed separately.
 
 ## Database and configuration
 
-- Schema migration: `src/main/resources/db/migration/V1__initial_schema.sql`
-- Bootstrap/onboarding constraints: `src/main/resources/db/migration/V2__super_admin_bootstrap_and_account_activation.sql`
+- Schema migrations: `src/main/resources/db/migration/V1__initial_schema.sql` through `V9__tenant_query_indexes.sql`
+- V8 leave overlap exclusion requires PostgreSQL's `btree_gist` extension. Docker initialization installs it before application migrations; externally managed databases must install it first.
 - Configuration: `application.yml`, `application-dev.yml`, and `application-prod.yml`
 - Required secrets and database properties are environment variables; see `.env.example`. `SUPER_ADMIN_BOOTSTRAP_ENABLED` defaults to `false`.
 - Spring Boot Actuator exposes health and info only.
