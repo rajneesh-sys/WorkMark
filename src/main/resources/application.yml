@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: workmark
+  profiles:
+    default: dev
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+springdoc:
+  api-docs:
+    enabled: ${SWAGGER_ENABLED:false}
+  swagger-ui:
+    enabled: ${SWAGGER_ENABLED:false}
+    path: /swagger-ui.html
+server:
+  port: ${SERVER_PORT:8080}
+app:
+  jwt:
+    secret: ${JWT_SECRET}
+    expiration-seconds: ${JWT_EXPIRATION_SECONDS:3600}
+  auth:
+    activation-token-ttl: ${ACCOUNT_ACTIVATION_TTL:PT24H}
+    login-rate-limit:
+      max-failures: ${LOGIN_RATE_LIMIT_MAX_FAILURES:5}
+      window: ${LOGIN_RATE_LIMIT_WINDOW:PT5M}
+      base-block: ${LOGIN_RATE_LIMIT_BASE_BLOCK:PT30S}
+      max-block: ${LOGIN_RATE_LIMIT_MAX_BLOCK:PT15M}
+      max-tracked-keys: ${LOGIN_RATE_LIMIT_MAX_TRACKED_KEYS:100000}
+  api-docs:
+    public: ${SWAGGER_PUBLIC:false}
+  bootstrap:
+    super-admin:
+      enabled: ${SUPER_ADMIN_BOOTSTRAP_ENABLED:false}
+      name: ${SUPER_ADMIN_NAME:}
+      email: ${SUPER_ADMIN_EMAIL:}
+      password: ${SUPER_ADMIN_PASSWORD:}

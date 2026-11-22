@@ -1,0 +1,18 @@
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/run/postgres-tls/server.crt
+      - -c
+      - ssl_key_file=/run/postgres-tls/server.key
+    volumes:
+      - ${POSTGRES_TLS_CERT_PATH:?Set POSTGRES_TLS_CERT_PATH}:/run/postgres-tls/server.crt:ro
+      - ${POSTGRES_TLS_KEY_PATH:?Set POSTGRES_TLS_KEY_PATH}:/run/postgres-tls/server.key:ro
+  app:
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_SSL_MODE: verify-full
+      SWAGGER_PUBLIC: "false"

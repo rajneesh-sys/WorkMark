@@ -1,0 +1,52 @@
+services:
+  postgres:
+    build:
+      context: ./docker/postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_APP_USER: ${DB_USERNAME:?Set DB_USERNAME in .env}
+      POSTGRES_APP_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    volumes:
+      - workmark-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_URL: ${COMPOSE_DB_URL:-jdbc:postgresql://postgres:5432/${POSTGRES_DB}}
+      DB_USERNAME: ${DB_USERNAME:?Set DB_USERNAME in .env}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      DB_SSL_MODE: ${DB_SSL_MODE:-disable}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in your environment}
+      JWT_EXPIRATION_SECONDS: ${JWT_EXPIRATION_SECONDS:-3600}
+      SUPER_ADMIN_BOOTSTRAP_ENABLED: ${SUPER_ADMIN_BOOTSTRAP_ENABLED:-false}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-}
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-}
+      ACCOUNT_ACTIVATION_TTL: ${ACCOUNT_ACTIVATION_TTL:-PT24H}
+      LOGIN_RATE_LIMIT_MAX_FAILURES: ${LOGIN_RATE_LIMIT_MAX_FAILURES:-5}
+      LOGIN_RATE_LIMIT_WINDOW: ${LOGIN_RATE_LIMIT_WINDOW:-PT5M}
+      LOGIN_RATE_LIMIT_BASE_BLOCK: ${LOGIN_RATE_LIMIT_BASE_BLOCK:-PT30S}
+      LOGIN_RATE_LIMIT_MAX_BLOCK: ${LOGIN_RATE_LIMIT_MAX_BLOCK:-PT15M}
+      LOGIN_RATE_LIMIT_MAX_TRACKED_KEYS: ${LOGIN_RATE_LIMIT_MAX_TRACKED_KEYS:-100000}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+      SWAGGER_PUBLIC: ${SWAGGER_PUBLIC:-false}
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    networks:
+      - backend
+volumes:
+  workmark-data:
+networks:
+  backend:

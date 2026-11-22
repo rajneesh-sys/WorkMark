@@ -1,0 +1,10 @@
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+  app:
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      DB_SSL_MODE: disable
+      SWAGGER_ENABLED: "true"
+      SWAGGER_PUBLIC: "true"
