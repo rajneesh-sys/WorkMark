@@ -35,6 +35,8 @@ public class UserAccount extends AuditedEntity {
     private String passwordResetTokenHash;
     @Column(name = "password_reset_expires_at")
     private Instant passwordResetExpiresAt;
+    @Column(name = "password_reset_requested_at")
+    private Instant passwordResetRequestedAt;
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
     private UserRole role;
@@ -67,6 +69,7 @@ public class UserAccount extends AuditedEntity {
     public Instant getActivationExpiresAt() { return activationExpiresAt; }
     public String getPasswordResetTokenHash() { return passwordResetTokenHash; }
     public Instant getPasswordResetExpiresAt() { return passwordResetExpiresAt; }
+    public Instant getPasswordResetRequestedAt() { return passwordResetRequestedAt; }
     public UserRole getRole() { return role; }
     public boolean isActive() { return active; }
     public int getTokenVersion() { return tokenVersion; }
@@ -83,6 +86,9 @@ public class UserAccount extends AuditedEntity {
         active = false;
         activationTokenHash = tokenHash;
         activationExpiresAt = expiresAt;
+        passwordResetTokenHash = null;
+        passwordResetExpiresAt = null;
+        passwordResetRequestedAt = null;
     }
     public void activate(String encodedPassword) {
         passwordHash = encodedPassword;
@@ -94,13 +100,15 @@ public class UserAccount extends AuditedEntity {
         this.passwordHash = passwordHash;
         invalidateTokens();
     }
-    public void requirePasswordReset(String tokenHash, Instant expiresAt) {
+    public void requirePasswordReset(String tokenHash, Instant expiresAt, Instant requestedAt) {
         passwordResetTokenHash = tokenHash;
         passwordResetExpiresAt = expiresAt;
+        passwordResetRequestedAt = requestedAt;
     }
     public void resetPassword(String encodedPassword) {
         changePassword(encodedPassword);
         passwordResetTokenHash = null;
         passwordResetExpiresAt = null;
+        passwordResetRequestedAt = null;
     }
 }

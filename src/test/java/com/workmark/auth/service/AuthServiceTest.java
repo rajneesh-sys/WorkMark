@@ -12,6 +12,8 @@ import com.workmark.auth.repository.UserAccountRepository;
 import com.workmark.company.entity.Company;
 import com.workmark.company.repository.CompanyRepository;
 import com.workmark.employee.repository.EmployeeRepository;
+import com.workmark.employee.entity.Employee;
+import com.workmark.employee.entity.EmployeeStatus;
 import com.workmark.security.CurrentUser;
 import com.workmark.security.JwtService;
 import java.time.Clock;
@@ -48,6 +50,7 @@ class AuthServiceTest {
     @Mock EmployeeRepository employees;
     @Mock ActivationTokenService activationTokens;
     @Mock LoginRateLimiter loginRateLimiter;
+    @Mock PasswordResetRateLimiter passwordResetRateLimiter;
     @Mock AccountTokenDelivery tokenDelivery;
 
     @Test
@@ -138,6 +141,7 @@ class AuthServiceTest {
         account.requireActivation("token-hash", now.plusSeconds(600));
         when(activationTokens.hash("raw-token")).thenReturn("token-hash");
         when(users.findForActivationByTokenHash("token-hash")).thenReturn(java.util.Optional.of(account));
+        when(users.findForUpdateById(account.getId())).thenReturn(java.util.Optional.of(account));
         when(passwordEncoder.encode("LongEnoughPassword123")).thenReturn("bcrypt-hash");
 
         service.activateAccount(new ActivateAccountRequest("raw-token", "LongEnoughPassword123"));
@@ -185,7 +189,8 @@ class AuthServiceTest {
         UserAccount account = new UserAccount(companyId, "Admin", "admin@example.com",
                 "old-hash", UserRole.COMPANY_ADMIN);
         Instant now = Instant.parse("2026-11-22T12:00:00Z");
-        when(users.findByEmailIgnoreCase("admin@example.com")).thenReturn(java.util.Optional.of(account));
+        when(passwordResetRateLimiter.isAllowed("192.0.2.10", "admin@example.com")).thenReturn(true);
+        when(users.findForUpdateByEmailIgnoreCase("admin@example.com")).thenReturn(java.util.Optional.of(account));
         when(activationTokens.issue()).thenReturn(
                 new ActivationTokenService.IssuedToken("one-time-reset-token", "reset-token-hash",
                         now.plusSeconds(1800)));
@@ -197,7 +202,7 @@ class AuthServiceTest {
                 .thenReturn(java.util.Optional.of(account), java.util.Optional.empty());
         when(passwordEncoder.encode("NewSecurePassword2026")).thenReturn("new-hash");
 
-        var response = service.requestPasswordReset("ADMIN@example.com");
+        var response = service.requestPasswordReset("ADMIN@example.com", "192.0.2.10");
         assertEquals("one-time-reset-token", response.developmentToken());
         int previousVersion = account.getTokenVersion();
 
@@ -214,6 +219,56 @@ class AuthServiceTest {
         verify(passwordEncoder, never()).encode("AnotherSecurePassword2026");
     }
 
+    @Test
+    void activationRejectsInactiveEmployeeAndReplay() {
+        AuthService service = service();
+        UUID companyId = UUID.randomUUID();
+        UUID employeeId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-11-22T12:00:00Z");
+        UserAccount account = new UserAccount(companyId, "Employee", "employee@example.com",
+                null, UserRole.EMPLOYEE);
+        account.setEmployeeId(employeeId);
+        account.requireActivation("token-hash", now.plusSeconds(600));
+        Employee employee = new Employee(companyId, "E1", "Employee", "One", "employee@example.com",
+                null, null, null, null, java.time.LocalDate.of(2025, 1, 1));
+        employee.setStatus(EmployeeStatus.INACTIVE);
+        when(activationTokens.hash("raw-token")).thenReturn("token-hash");
+        when(users.findForActivationByTokenHash("token-hash"))
+                .thenReturn(java.util.Optional.of(account), java.util.Optional.empty());
+        when(employees.findForUpdateByIdAndCompanyId(employeeId, companyId))
+                .thenReturn(java.util.Optional.of(employee));
+
+        assertThrows(com.workmark.common.exception.ApiException.class,
+                () -> service.activateAccount(new ActivateAccountRequest("raw-token", "LongEnoughPassword123")));
+        assertFalse(account.isActive());
+        assertThrows(com.workmark.common.exception.ApiException.class,
+                () -> service.activateAccount(new ActivateAccountRequest("raw-token", "LongEnoughPassword123")));
+    }
+
+    @Test
+    void repeatedPasswordResetRequestDoesNotReplaceValidToken() {
+        AuthService service = service();
+        UUID companyId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-11-22T12:00:00Z");
+        UserAccount account = new UserAccount(companyId, "Admin", "admin@example.com",
+                "old-hash", UserRole.COMPANY_ADMIN);
+        when(passwordResetRateLimiter.isAllowed("192.0.2.10", "admin@example.com")).thenReturn(true);
+        when(users.findForUpdateByEmailIgnoreCase("admin@example.com"))
+                .thenReturn(java.util.Optional.of(account));
+        when(activationTokens.issue()).thenReturn(
+                new ActivationTokenService.IssuedToken("first-reset-token", "first-reset-hash",
+                        now.plusSeconds(1800)));
+        when(tokenDelivery.deliver(anyString(), anyString(), anyString(), any(),
+                eq(AccountTokenDelivery.Purpose.PASSWORD_RESET))).thenReturn("first-reset-token");
+
+        var first = service.requestPasswordReset("ADMIN@example.com", "192.0.2.10");
+        var second = service.requestPasswordReset("ADMIN@example.com", "192.0.2.10");
+
+        assertEquals("first-reset-token", first.developmentToken());
+        assertNull(second.developmentToken());
+        verify(activationTokens, times(1)).issue();
+    }
+
     private CurrentUser superAdmin() {
         return new CurrentUser(UUID.randomUUID(), null, null, "platform@example.com", "hash",
                 UserRole.SUPER_ADMIN, 0);
@@ -226,8 +281,11 @@ class AuthServiceTest {
 
     private AuthService service() {
         return new AuthService(companies, users, passwordEncoder, authenticationManager, jwtService,
-                employees, activationTokens, tokenDelivery, loginRateLimiter, new PasswordPolicy(),
+                employees, activationTokens, tokenDelivery, loginRateLimiter,
+                passwordResetRateLimiter, new PasswordPolicy(),
                 Clock.fixed(Instant.parse("2026-11-22T12:00:00Z"), ZoneOffset.UTC),
-                java.time.Duration.ofMinutes(30), 3600);
+                java.time.Duration.ofMinutes(30),
+                java.time.Duration.ofSeconds(60),
+                3600);
     }
 }

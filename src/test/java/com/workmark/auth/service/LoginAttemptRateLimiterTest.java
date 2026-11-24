@@ -34,7 +34,10 @@ class LoginAttemptRateLimiterTest {
 
     @Test
     void throttlesAnIpAcrossDifferentAccountIdentifiers() {
-        LoginAttemptRateLimiter limiter = limiter(new MutableClock(Instant.parse("2026-11-22T12:00:00Z")));
+        LoginRateLimitProperties properties = properties();
+        properties.setIpMaxFailures(2);
+        LoginAttemptRateLimiter limiter = new LoginAttemptRateLimiter(properties,
+                new MutableClock(Instant.parse("2026-11-22T12:00:00Z")));
 
         assertTrue(limiter.isAllowed("198.51.100.1", "first@example.com"));
         limiter.recordFailure("198.51.100.1", "first@example.com");
@@ -47,7 +50,10 @@ class LoginAttemptRateLimiterTest {
 
     @Test
     void successfulLoginClearsOnlyTheAccountFailureState() {
-        LoginAttemptRateLimiter limiter = limiter(new MutableClock(Instant.parse("2026-11-22T12:00:00Z")));
+        LoginRateLimitProperties properties = properties();
+        properties.setIpMaxFailures(2);
+        LoginAttemptRateLimiter limiter = new LoginAttemptRateLimiter(properties,
+                new MutableClock(Instant.parse("2026-11-22T12:00:00Z")));
         String ip = "203.0.113.1";
 
         limiter.isAllowed(ip, "user@example.com");
@@ -78,6 +84,7 @@ class LoginAttemptRateLimiterTest {
     private LoginRateLimitProperties properties() {
         LoginRateLimitProperties properties = new LoginRateLimitProperties();
         properties.setMaxFailures(2);
+        properties.setIpMaxFailures(20);
         properties.setWindow(Duration.ofMinutes(5));
         properties.setBaseBlock(Duration.ofSeconds(30));
         properties.setMaxBlock(Duration.ofMinutes(2));

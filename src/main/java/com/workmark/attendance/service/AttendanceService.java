@@ -159,8 +159,13 @@ public class AttendanceService {
         AttendanceCorrection.AttendanceCorrectionRequestValues values =
                 new AttendanceCorrection.AttendanceCorrectionRequestValues(request.attendanceDate(),
                         request.checkInTime(), request.checkOutTime(), minutes, request.status());
-        corrections.save(new AttendanceCorrection(record, user.getId(), request.reason(), clock.instant(), values));
-        record.correct(request.attendanceDate(), request.checkInTime(), request.checkOutTime(), request.status());
+        try {
+            corrections.save(new AttendanceCorrection(record, user.getId(), request.reason(), clock.instant(), values));
+            record.correct(request.attendanceDate(), request.checkInTime(), request.checkOutTime(), request.status());
+        } catch (DataIntegrityViolationException exception) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "The corrected attendance conflicts with existing attendance data");
+        }
         return view(record);
     }
 

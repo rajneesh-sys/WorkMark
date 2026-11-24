@@ -13,14 +13,18 @@ import com.workmark.security.CurrentUser;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.UUID;
+import java.util.Set;
 
 @Service
 public class EmployeeService {
+    private static final Set<String> ALLOWED_SORT_FIELDS = Set.of(
+            "employeeCode", "firstName", "lastName", "email", "designation", "joiningDate", "status", "id");
     private final EmployeeRepository employees;
     private final DepartmentRepository departments;
     private final UserAccountRepository users;
@@ -73,8 +77,15 @@ public class EmployeeService {
         if (pageable.getPageNumber() < 0 || pageable.getPageSize() < 1) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Page must be non-negative and size must be positive");
         }
-        Pageable bounded = PageRequest.of(pageable.getPageNumber(), Math.min(pageable.getPageSize(), 100),
-                pageable.getSort());
+        validateSort(pageable.getSort());
+        Sort sort = pageable.getSort();
+        if (sort.getOrderFor("id") == null) {
+            sort = sort.and(Sort.by("id").ascending());
+        }
+        if (!sort.isSorted()) {
+            sort = Sort.by("lastName").ascending().and(Sort.by("id").ascending());
+        }
+        Pageable bounded = PageRequest.of(pageable.getPageNumber(), Math.min(pageable.getPageSize(), 100), sort);
         String normalizedQuery = query == null ? "" : query.trim();
         Page<Employee> page;
         if (user.getRole() == com.workmark.auth.entity.UserRole.MANAGER) {
@@ -109,11 +120,19 @@ public class EmployeeService {
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Employee not found"));
         employee.setStatus(status);
         if (status == EmployeeStatus.INACTIVE) {
-            for (UserAccount account : users.findAllByCompanyIdAndEmployeeIdAndActiveTrue(companyId, id)) {
+            for (UserAccount account : users.findAllForUpdateByCompanyIdAndEmployeeId(companyId, id)) {
                 account.deactivate();
             }
         }
         return view(employee);
+    }
+
+    private void validateSort(Sort sort) {
+        for (Sort.Order order : sort) {
+            if (!ALLOWED_SORT_FIELDS.contains(order.getProperty())) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid employee sort field");
+            }
+        }
     }
 
     private void validateReferences(UUID companyId, EmployeeRequest request, UUID employeeId) {

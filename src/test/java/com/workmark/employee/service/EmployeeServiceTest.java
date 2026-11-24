@@ -15,6 +15,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 
@@ -140,7 +143,7 @@ class EmployeeServiceTest {
         account.setEmployeeId(employee.getId());
         when(employees.findForUpdateByIdAndCompanyId(employee.getId(), companyId))
                 .thenReturn(Optional.of(employee));
-        when(users.findAllByCompanyIdAndEmployeeIdAndActiveTrue(companyId, employee.getId()))
+        when(users.findAllForUpdateByCompanyIdAndEmployeeId(companyId, employee.getId()))
                 .thenReturn(List.of(account));
         EmployeeService service = service();
         CurrentUser hr = staff(companyId, UserRole.HR);
@@ -156,6 +159,36 @@ class EmployeeServiceTest {
         assertEquals(EmployeeStatus.ACTIVE, employee.getStatus());
         assertFalse(account.isActive());
         assertEquals(1, account.getTokenVersion());
+    }
+
+    @Test
+    void employeePaginationAddsIdTieBreaker() {
+        UUID companyId = UUID.randomUUID();
+        CurrentUser hr = staff(companyId, UserRole.HR);
+        when(employees.findAllByCompanyId(eq(companyId), any()))
+                .thenReturn(new PageImpl<>(List.of()));
+
+        service().list(companyId, hr, null,
+                PageRequest.of(0, 20, Sort.by("lastName").ascending()));
+
+        org.mockito.ArgumentCaptor<Pageable> captor =
+                org.mockito.ArgumentCaptor.forClass(Pageable.class);
+        verify(employees).findAllByCompanyId(eq(companyId), captor.capture());
+        assertEquals("lastName", captor.getValue().getSort().getOrderFor("lastName").getProperty());
+        assertEquals("id", captor.getValue().getSort().getOrderFor("id").getProperty());
+    }
+
+    @Test
+    void employeePaginationRejectsInvalidSortField() {
+        UUID companyId = UUID.randomUUID();
+        CurrentUser hr = staff(companyId, UserRole.HR);
+
+        ApiException error = assertThrows(ApiException.class,
+                () -> service().list(companyId, hr, null,
+                        PageRequest.of(0, 20, Sort.by("passwordHash").descending())));
+
+        assertEquals(HttpStatus.BAD_REQUEST, error.getStatus());
+        verifyNoInteractions(employees);
     }
 
     private EmployeeRequest request(UUID departmentId, UUID managerId) {

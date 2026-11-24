@@ -34,11 +34,15 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Locale;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Service
 public class AuthService {
+    private static final Logger log = LoggerFactory.getLogger(AuthService.class);
     private final CompanyRepository companies;
     private final UserAccountRepository users;
     private final PasswordEncoder passwordEncoder;
@@ -48,17 +52,21 @@ public class AuthService {
     private final ActivationTokenService activationTokens;
     private final AccountTokenDelivery tokenDelivery;
     private final LoginRateLimiter loginRateLimiter;
+    private final PasswordResetRateLimiter passwordResetRateLimiter;
     private final PasswordPolicy passwordPolicy;
     private final Clock clock;
     private final Duration passwordResetTtl;
+    private final Duration passwordResetCooldown;
     private final long expirationSeconds;
 
     public AuthService(CompanyRepository companies, UserAccountRepository users, PasswordEncoder passwordEncoder,
                        AuthenticationManager authenticationManager, JwtService jwtService,
                        EmployeeRepository employees, ActivationTokenService activationTokens,
                        AccountTokenDelivery tokenDelivery, LoginRateLimiter loginRateLimiter,
+                       PasswordResetRateLimiter passwordResetRateLimiter,
                        PasswordPolicy passwordPolicy, Clock clock,
                        @Value("${app.auth.password-reset-ttl:PT30M}") Duration passwordResetTtl,
+                       @Value("${app.auth.password-reset-cooldown:PT60S}") Duration passwordResetCooldown,
                        @Value("${app.jwt.expiration-seconds:3600}") long expirationSeconds) {
         this.companies = companies;
         this.users = users;
@@ -69,12 +77,17 @@ public class AuthService {
         this.activationTokens = activationTokens;
         this.tokenDelivery = tokenDelivery;
         this.loginRateLimiter = loginRateLimiter;
+        this.passwordResetRateLimiter = passwordResetRateLimiter;
         this.passwordPolicy = passwordPolicy;
         this.clock = clock;
         if (passwordResetTtl.isZero() || passwordResetTtl.isNegative()) {
             throw new IllegalArgumentException("Password reset token TTL must be positive");
         }
         this.passwordResetTtl = passwordResetTtl;
+        if (passwordResetCooldown.isNegative() || passwordResetCooldown.isZero()) {
+            throw new IllegalArgumentException("Password reset cooldown must be positive");
+        }
+        this.passwordResetCooldown = passwordResetCooldown;
         this.expirationSeconds = expirationSeconds;
     }
 
@@ -104,9 +117,30 @@ public class AuthService {
     public void activateAccount(ActivateAccountRequest request) {
         passwordPolicy.validate(request.password());
         String tokenHash = activationTokens.hash(request.token());
-        UserAccount user = users.findForActivationByTokenHash(tokenHash)
+        UserAccount candidate = users.findForActivationByTokenHash(tokenHash)
                 .filter(account -> account.getActivationExpiresAt().isAfter(clock.instant()))
                 .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Activation token is invalid or expired"));
+        if (candidate.getRole() == UserRole.EMPLOYEE || candidate.getRole() == UserRole.MANAGER) {
+            if (candidate.getCompanyId() == null || candidate.getEmployeeId() == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "Activation token is not associated with an active employee");
+            }
+            Employee employee = employees.findForUpdateByIdAndCompanyId(candidate.getEmployeeId(),
+                            candidate.getCompanyId())
+                    .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST,
+                            "Activation token is invalid or the employee no longer exists"));
+            if (employee.getStatus() != com.workmark.employee.entity.EmployeeStatus.ACTIVE) {
+                throw new ApiException(HttpStatus.CONFLICT, "The employee account is inactive");
+            }
+        }
+        UserAccount user = users.findForUpdateById(candidate.getId())
+                .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Activation token is invalid or expired"));
+        if (user.getActivationTokenHash() == null
+                || !user.getActivationTokenHash().equals(tokenHash)
+                || user.getActivationExpiresAt() == null
+                || !user.getActivationExpiresAt().isAfter(clock.instant())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Activation token is invalid or expired");
+        }
         user.activate(passwordEncoder.encode(request.password()));
     }
 
@@ -147,7 +181,7 @@ public class AuthService {
     public AccountInvitationResponse createEmployeeAccount(UUID companyId, CurrentUser actor,
                                                            CreateEmployeeAccountRequest request) {
         requireCompanyRole(companyId, actor, UserRole.COMPANY_ADMIN, UserRole.HR);
-        Employee employee = employees.findByIdAndCompanyId(request.employeeId(), companyId)
+        Employee employee = employees.findForUpdateByIdAndCompanyId(request.employeeId(), companyId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Employee not found"));
         if (employee.getStatus() != com.workmark.employee.entity.EmployeeStatus.ACTIVE) {
             throw new ApiException(HttpStatus.CONFLICT, "Cannot create an account for an inactive employee");
@@ -182,7 +216,7 @@ public class AuthService {
             if (request.employeeId() == null) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "A manager account must be linked to an employee");
             }
-            linkedEmployee = employees.findByIdAndCompanyId(request.employeeId(), companyId)
+            linkedEmployee = employees.findForUpdateByIdAndCompanyId(request.employeeId(), companyId)
                     .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Employee not found"));
             if (linkedEmployee.getStatus() != com.workmark.employee.entity.EmployeeStatus.ACTIVE) {
                 throw new ApiException(HttpStatus.CONFLICT, "Cannot create an account for an inactive employee");
@@ -228,18 +262,39 @@ public class AuthService {
     }
 
     @Transactional
-    public PasswordResetRequestResponse requestPasswordReset(String email) {
+    public PasswordResetRequestResponse requestPasswordReset(String email, String remoteAddress) {
         String normalizedEmail = email.trim().toLowerCase(Locale.ROOT);
-        UserAccount user = users.findByEmailIgnoreCase(normalizedEmail)
+        if (!passwordResetRateLimiter.isAllowed(remoteAddress, normalizedEmail)) {
+            return new PasswordResetRequestResponse(null);
+        }
+        passwordResetRateLimiter.recordRequest(remoteAddress, normalizedEmail);
+        UserAccount user = users.findForUpdateByEmailIgnoreCase(normalizedEmail)
                 .filter(UserAccount::isActive)
                 .orElse(null);
         if (user == null) {
             return new PasswordResetRequestResponse(null);
         }
+        Instant now = clock.instant();
+        if (user.getPasswordResetRequestedAt() != null
+                && now.isBefore(user.getPasswordResetRequestedAt().plus(passwordResetCooldown))) {
+            return new PasswordResetRequestResponse(null);
+        }
+        if (user.getPasswordResetTokenHash() != null
+                && user.getPasswordResetExpiresAt() != null
+                && now.isBefore(user.getPasswordResetExpiresAt())) {
+            return new PasswordResetRequestResponse(null);
+        }
         ActivationTokenService.IssuedToken token = activationTokens.issue();
-        user.requirePasswordReset(token.hash(), token.expiresAt());
-        String exposedToken = tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
-                token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_RESET);
+        user.requirePasswordReset(token.hash(), token.expiresAt(), now);
+        String exposedToken;
+        try {
+            exposedToken = tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
+                    token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_RESET);
+        } catch (RuntimeException exception) {
+            log.error("Password-reset delivery failed for account {}",
+                    user.getId(), exception);
+            throw exception;
+        }
         return new PasswordResetRequestResponse(exposedToken);
     }
 
@@ -251,6 +306,7 @@ public class AuthService {
                 .filter(account -> account.getPasswordResetExpiresAt().isAfter(clock.instant()))
                 .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Password reset token is invalid or expired"));
         user.resetPassword(passwordEncoder.encode(request.newPassword()));
+        passwordResetRateLimiter.recordSuccess(user.getEmail());
     }
 
     private void requireCompanyRole(UUID companyId, CurrentUser actor, UserRole... allowedRoles) {

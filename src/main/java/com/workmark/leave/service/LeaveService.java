@@ -22,6 +22,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -72,11 +73,16 @@ public class LeaveService {
             throw new ApiException(HttpStatus.CONFLICT, "Leave dates overlap an existing pending or approved request");
         }
         BigDecimal days = BigDecimal.valueOf(ChronoUnit.DAYS.between(request.startDate(), request.endDate()) + 1);
-        LeaveRequest leave = leaveRequests.save(new LeaveRequest(companyId, employeeId, request.leaveType(),
-                request.startDate(), request.endDate(), days, request.reason()));
-        recordHistory(companyId, leave, null, LeaveStatus.PENDING, user,
-                LeaveHistoryAction.SUBMITTED, request.reason());
-        return view(leave);
+        try {
+            LeaveRequest leave = leaveRequests.save(new LeaveRequest(companyId, employeeId, request.leaveType(),
+                    request.startDate(), request.endDate(), days, request.reason()));
+            recordHistory(companyId, leave, null, LeaveStatus.PENDING, user,
+                    LeaveHistoryAction.SUBMITTED, request.reason());
+            return view(leave);
+        } catch (DataIntegrityViolationException exception) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "Leave dates overlap an existing pending or approved request");
+        }
     }
 
     @Transactional(readOnly = true)

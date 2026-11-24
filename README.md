@@ -108,6 +108,8 @@ Roles:
 
 JWTs are signed with an environment-supplied HMAC secret, expire after a configurable interval, and contain no tenant authority claims. Every request reloads the account and checks its token version and company status. The logout implementation is deliberately stateful: it revokes all access tokens belonging to that account.
 
+JWTs require `iss=workmark` and `aud=workmark-api` by default. Override only through `JWT_ISSUER` and `JWT_AUDIENCE` where all signing and verification deployments share the same values. Expiration must be positive and no more than 86400 seconds.
+
 Failed logins are temporarily throttled by both source IP and normalized account identifier. Limits are configurable with `LOGIN_RATE_LIMIT_MAX_FAILURES`, `LOGIN_RATE_LIMIT_WINDOW`, `LOGIN_RATE_LIMIT_BASE_BLOCK`, `LOGIN_RATE_LIMIT_MAX_BLOCK`, and `LOGIN_RATE_LIMIT_MAX_TRACKED_KEYS`. Development and test use an in-memory limiter; production uses PostgreSQL-backed shared buckets with HMAC-hashed identifiers. Forwarded IP headers are ignored unless the immediate proxy is listed in `TRUSTED_PROXY_CIDRS`. Configure `CORS_ALLOWED_ORIGINS` as a comma-separated exact-origin allowlist; it is empty by default and wildcard origins are not supported.
 
 Deactivating an employee deactivates every linked account and increments its token version in the same transaction. Reactivating the employee record does not reactivate its account; an authorized account-recovery/reactivation workflow must be completed separately.
@@ -115,7 +117,27 @@ Deactivating an employee deactivates every linked account and increments its tok
 ## Database and configuration
 
 - Schema migrations: `src/main/resources/db/migration/V1__initial_schema.sql` through `V9__tenant_query_indexes.sql`
-- V8 leave overlap exclusion requires PostgreSQL's `btree_gist` extension. Docker initialization installs it before application migrations; externally managed databases must install it first.
+- V8 leave overlap exclusion requires PostgreSQL's `btree_gist` extension in the same database used by `DB_URL`. Docker initialization installs it before application migrations on a new data volume. For an existing/local database, connect as a database administrator and run `CREATE EXTENSION IF NOT EXISTS btree_gist;`, for example:
+
+  ```powershell
+  psql -h localhost -p 5432 -U your-database-admin -d workmark -c "CREATE EXTENSION IF NOT EXISTS btree_gist;"
+  ```
+
+  For an existing Docker volume, run:
+
+  ```powershell
+  docker compose exec postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CREATE EXTENSION IF NOT EXISTS btree_gist;"'
+  ```
+
+  Init scripts do not rerun for an existing volume; do not delete the volume to apply this change. Restart the application after the extension is installed. Keep the application role least-privileged rather than granting it superuser access.
+
+For externally managed PostgreSQL, provision `btree_gist` with a database administrator before deploying V8 or V11. The application role must not be granted superuser privileges. From an administrator shell:
+
+```powershell
+psql "$env:DB_URL" -U "database-admin" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS btree_gist;"
+```
+
+The repository also provides `scripts/provision-btree-gist.ps1`; it requires the database URL, administrator username, and secure administrator password, and intentionally does not grant any role-based privilege escalation.
 - Configuration: `application.yml`, `application-dev.yml`, and `application-prod.yml`
 - Required secrets and database properties are environment variables; see `.env.example`. `SUPER_ADMIN_BOOTSTRAP_ENABLED` defaults to `false`.
 - Spring Boot Actuator exposes health and info only.

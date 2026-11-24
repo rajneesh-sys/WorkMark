@@ -58,9 +58,10 @@ public class AuthController {
     @Operation(summary = "Request a password reset without disclosing whether an account exists")
     @ResponseStatus(HttpStatus.ACCEPTED)
     public ApiResponse<PasswordResetRequestResponse> requestPasswordReset(
-            @Valid @RequestBody PasswordResetRequest request) {
+            @Valid @RequestBody PasswordResetRequest request, HttpServletRequest servletRequest) {
         return ApiResponse.ok("If the account is eligible, password-reset instructions will be sent",
-                authService.requestPasswordReset(request.email()));
+                authService.requestPasswordReset(request.email(),
+                        clientIpResolver.resolve(servletRequest)));
     }
 
     @PostMapping("/password-reset/confirm")

@@ -56,15 +56,15 @@ public class LoginAttemptRateLimiter implements LoginRateLimiter {
 
     public synchronized void recordFailure(String remoteAddress, String email) {
         Instant now = clock.instant();
-        recordFailure(ipKey(remoteAddress), now);
-        recordFailure(accountKey(email), now);
+        recordFailure(ipKey(remoteAddress), properties.getIpMaxFailures(), now);
+        recordFailure(accountKey(email), properties.getMaxFailures(), now);
     }
 
     public synchronized void recordSuccess(String email) {
         buckets.remove(accountKey(email));
     }
 
-    private void recordFailure(String key, Instant now) {
+    private void recordFailure(String key, int threshold, Instant now) {
         Bucket bucket = buckets.get(key);
         if (bucket == null) {
             return;
@@ -72,7 +72,7 @@ public class LoginAttemptRateLimiter implements LoginRateLimiter {
         refresh(bucket, now);
         bucket.failures.addLast(now);
         bucket.lastTouched = now;
-        if (bucket.failures.size() >= properties.getMaxFailures()) {
+        if (bucket.failures.size() >= threshold) {
             bucket.blockedUntil = now.plus(blockDuration(bucket.blockLevel));
             bucket.blockLevel++;
             bucket.failures.clear();

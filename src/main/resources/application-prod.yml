@@ -18,6 +18,10 @@ spring:
           auth: ${SMTP_AUTH:true}
           starttls:
             enable: ${SMTP_STARTTLS:true}
+            required: ${SMTP_STARTTLS_REQUIRED:true}
+          ssl:
+            trust: ${SMTP_SSL_TRUST:}
+            checkserveridentity: true
   jpa:
     show-sql: false
 logging:

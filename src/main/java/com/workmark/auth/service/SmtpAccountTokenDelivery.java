@@ -7,16 +7,33 @@ import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.mail.MailException;
 
 @Component
-@Profile("prod")
+@Profile({"prod", "staging"})
 public class SmtpAccountTokenDelivery implements AccountTokenDelivery {
+    private static final Logger log = LoggerFactory.getLogger(SmtpAccountTokenDelivery.class);
     private final JavaMailSender mailSender;
     private final String from;
 
-    public SmtpAccountTokenDelivery(JavaMailSender mailSender, @Value("${app.mail.from}") String from) {
+    public SmtpAccountTokenDelivery(JavaMailSender mailSender,
+                                    @Value("${app.mail.from}") String from,
+                                    @Value("${spring.mail.host}") String host,
+                                    @Value("${spring.mail.properties.mail.smtp.starttls.required:true}") boolean startTlsRequired,
+                                    @Value("${spring.mail.properties.mail.smtp.ssl.checkserveridentity:true}") boolean certificateIdentityRequired) {
         if (from.isBlank()) {
             throw new IllegalStateException("A verified sender address is required in production");
+        }
+        if (host == null || host.isBlank()) {
+            throw new IllegalStateException("SMTP_HOST is required in production");
+        }
+        if (!startTlsRequired) {
+            throw new IllegalStateException("SMTP STARTTLS must be required in production");
+        }
+        if (!certificateIdentityRequired) {
+            throw new IllegalStateException("SMTP certificate hostname verification must be enabled");
         }
         this.mailSender = mailSender;
         this.from = from;
@@ -35,7 +52,12 @@ public class SmtpAccountTokenDelivery implements AccountTokenDelivery {
         message.setText("Hello " + displayName + ",\n\nUse this one-time token to " + action + ":\n"
                 + token + "\n\nSubmit it to " + endpoint + " before " + expiresAt
                 + ". If you did not request this, you can ignore this message.");
-        mailSender.send(message);
-        return null;
+        try {
+            mailSender.send(message);
+            return null;
+        } catch (MailException exception) {
+            log.error("Secure SMTP delivery failed for account purpose {}", purpose);
+            throw exception;
+        }
     }
 }

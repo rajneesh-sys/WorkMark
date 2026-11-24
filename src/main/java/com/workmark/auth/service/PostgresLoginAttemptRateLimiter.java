@@ -29,7 +29,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Service
-@Profile("prod")
+@Profile({"prod", "staging"})
 public class PostgresLoginAttemptRateLimiter implements LoginRateLimiter {
     private static final long INSERT_LOCK_KEY = 6288528922353146194L;
     private static final String SELECT_BUCKET =

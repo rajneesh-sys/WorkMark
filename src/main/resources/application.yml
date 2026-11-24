@@ -34,9 +34,12 @@ app:
   jwt:
     secret: ${JWT_SECRET}
     expiration-seconds: ${JWT_EXPIRATION_SECONDS:3600}
+    issuer: ${JWT_ISSUER:workmark}
+    audience: ${JWT_AUDIENCE:workmark-api}
   auth:
     activation-token-ttl: ${ACCOUNT_ACTIVATION_TTL:PT24H}
     password-reset-ttl: ${PASSWORD_RESET_TTL:PT30M}
+    password-reset-cooldown: ${PASSWORD_RESET_COOLDOWN:PT60S}
     login-rate-limit:
       max-failures: ${LOGIN_RATE_LIMIT_MAX_FAILURES:5}
       window: ${LOGIN_RATE_LIMIT_WINDOW:PT5M}
@@ -44,6 +47,9 @@ app:
       max-block: ${LOGIN_RATE_LIMIT_MAX_BLOCK:PT15M}
       max-tracked-keys: ${LOGIN_RATE_LIMIT_MAX_TRACKED_KEYS:100000}
       ip-max-failures: ${LOGIN_RATE_LIMIT_IP_MAX_FAILURES:20}
+      reset-max-failures: ${PASSWORD_RESET_MAX_FAILURES:3}
+      reset-ip-max-failures: ${PASSWORD_RESET_IP_MAX_FAILURES:10}
+      reset-max-tracked-keys: ${PASSWORD_RESET_MAX_TRACKED_KEYS:100000}
       trusted-proxies: ${TRUSTED_PROXY_CIDRS:}
   api-docs:
     public: ${SWAGGER_PUBLIC:false}
