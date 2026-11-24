@@ -44,7 +44,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
 
 The production override enables PostgreSQL TLS and requires JDBC `sslmode=verify-full`; the certificate must be valid for the `postgres` service name and trusted by the application's JVM. Keep the database host port unpublished. The application uses a separate database superuser only to initialize the least-privilege app role. For an externally managed database, deploy the application container without the local PostgreSQL service and provide `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, and `DB_SSL_MODE=verify-full` through the deployment platform.
 
-The host-run development profile supports `DB_SSL_MODE=disable` for local PostgreSQL. Production defaults to `verify-full`. Production SMTP is configured with `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM`. The Docker image runs as a non-root user; Compose makes the app filesystem read-only, enables a readiness health check, and drops Linux capabilities. `.env` files and local build artifacts are excluded from the Docker context, and `.env.*` is ignored by Git except for `.env.example`. Never copy development TLS settings into production.
+The host-run development profile supports `DB_SSL_MODE=disable` for local PostgreSQL. Production defaults to `verify-full`. Production SMTP is configured with `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM`. Invitation, activation/setup, and password-reset messages are stored in the same transaction as their token changes, encrypted with AES-256-GCM, then delivered by a background worker after commit. Retries reuse the same expiring token with capped exponential backoff; successful, expired, and exhausted messages have their encrypted payload removed. Set `ACCOUNT_TOKEN_OUTBOX_KEY` to a separately managed Base64-encoded 32-byte key (for example, generate one with `openssl rand -base64 32`); do not reuse `JWT_SECRET` or commit the key. `ACCOUNT_TOKEN_OUTBOX_MAX_ATTEMPTS`, `ACCOUNT_TOKEN_OUTBOX_BASE_RETRY_DELAY`, `ACCOUNT_TOKEN_OUTBOX_MAX_RETRY_DELAY`, and `ACCOUNT_TOKEN_OUTBOX_POLL_INTERVAL_MS` control worker retry behavior. The worker logs message IDs and failure categories only, never email addresses or tokens. The Docker image runs as a non-root user; Compose makes the app filesystem read-only, enables a readiness health check, and drops Linux capabilities. `.env` files and local build artifacts are excluded from the Docker context, and `.env.*` is ignored by Git except for `.env.example`. Never copy development TLS settings into production.
 
 ## API and initial Super Admin
 
@@ -71,9 +71,9 @@ Login is `POST /api/v1/auth/login`. Send the returned token as `Authorization: B
 
 ## Company onboarding
 
-Only a logged-in `SUPER_ADMIN` can register a company using `POST /api/v1/companies`. The request contains company details and the first admin's name/email; it does not accept a role or password. The company and inactive `COMPANY_ADMIN` account are committed in one transaction. A random, one-time password-setup token is generated; only its SHA-256 hash and expiration are stored. In `dev` and `test`, the token is returned for local use; in `prod`, it is sent to the company administrator using SMTP and omitted from the API response. It expires after `ACCOUNT_ACTIVATION_TTL` (default 24 hours).
+Only a logged-in `SUPER_ADMIN` can register a company using `POST /api/v1/companies`. The request contains company details and the first admin's name/email; it does not accept a role or password. The company and inactive `COMPANY_ADMIN` account are committed in one transaction. A random, one-time password-setup token is generated; only its SHA-256 hash and expiration are stored. In `dev` and `test`, the token is returned for local use; in `prod` and `staging`, it is queued for encrypted SMTP delivery and omitted from the API response. The durable queue is claimed using PostgreSQL row locking and recovers pending messages after restarts. The token expires after `ACCOUNT_ACTIVATION_TTL` (default 24 hours).
 
-The admin sets a password at `POST /api/v1/auth/activate`, then signs in through `/api/v1/auth/login`. Activation is one-time and cannot change the assigned role. In `dev` and `test`, the one-time token is returned for local testing; `prod` sends it through SMTP and never returns it in the API response. Password reset uses `POST /api/v1/auth/password-reset/request` and `/api/v1/auth/password-reset/confirm`; production reset requests have a generic response and use the same one-time SMTP delivery flow. There is no public company or Super Admin registration endpoint.
+The admin sets a password at `POST /api/v1/auth/activate`, then signs in through `/api/v1/auth/login`. Passwords must be at least 12 characters, fit within BCrypt's 72 UTF-8-byte limit, and not be common, repetitive, or sequential. Activation is one-time and cannot change the assigned role. In `dev` and `test`, the one-time token is returned for local testing; `prod` and `staging` queue it for SMTP and never return it in the API response. Password reset uses `POST /api/v1/auth/password-reset/request` and `/api/v1/auth/password-reset/confirm`; production reset requests have a generic response and use the same encrypted outbox delivery flow. There is no public company or Super Admin registration endpoint.
 
 Company administrators and HR can create employee logins using `POST /api/v1/auth/employee-account`. A company administrator can create HR or manager logins at `POST /api/v1/auth/company-account`. `POST /api/v1/auth/password` lets a user change their password; all existing access tokens are invalidated and the user must sign in again.
 
@@ -82,7 +82,7 @@ Company administrators and HR can create employee logins using `POST /api/v1/aut
 | Module | Main routes |
 |---|---|
 | Auth | `/auth/login`, `/auth/activate`, `/auth/logout`, `/auth/me` |
-| Company | `POST /companies` (Super Admin only), `/companies/me`, `/companies/{id}/status` |
+| Company | `POST /companies` (Super Admin only), `/companies/me`, `/companies/{id}/status` (Super Admin only; transitions are audited) |
 | Employee | `/employees` |
 | Department | `/departments` |
 | Leave | `/leaves`, `/leaves/pending`, `/leaves/policies`, `/leaves/balances`, `/leaves/{id}/history`, `/leaves/{id}/approve`, `/leaves/{id}/reject`, `/leaves/{id}/cancel` |
@@ -106,7 +106,7 @@ Roles:
 
 `SUPER_ADMIN` is not publicly self-registered; the initial platform account must be provisioned through a controlled operator process.
 
-JWTs are signed with an environment-supplied HMAC secret, expire after a configurable interval, and contain no tenant authority claims. Every request reloads the account and checks its token version and company status. The logout implementation is deliberately stateful: it revokes all access tokens belonging to that account.
+JWTs are signed with an environment-supplied HMAC secret, expire after a configurable interval, and contain no tenant authority claims. Every request reloads the account and checks its token version and company status. The logout implementation is deliberately stateful: it revokes all access tokens belonging to that account. Security responses include a restrictive Content-Security-Policy and a Permissions-Policy; inline scripts/styles are allowed only to preserve the bundled Swagger UI.
 
 JWTs require `iss=workmark` and `aud=workmark-api` by default. Override only through `JWT_ISSUER` and `JWT_AUDIENCE` where all signing and verification deployments share the same values. Expiration must be positive and no more than 86400 seconds.
 
@@ -116,7 +116,7 @@ Deactivating an employee deactivates every linked account and increments its tok
 
 ## Database and configuration
 
-- Schema migrations: `src/main/resources/db/migration/V1__initial_schema.sql` through `V9__tenant_query_indexes.sql`
+- Schema migrations: `src/main/resources/db/migration/V1__initial_schema.sql` through `V14__password_reset_bucket_cleanup_index.sql`
 - V8 leave overlap exclusion requires PostgreSQL's `btree_gist` extension in the same database used by `DB_URL`. Docker initialization installs it before application migrations on a new data volume. For an existing/local database, connect as a database administrator and run `CREATE EXTENSION IF NOT EXISTS btree_gist;`, for example:
 
   ```powershell
@@ -140,7 +140,7 @@ psql "$env:DB_URL" -U "database-admin" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION I
 The repository also provides `scripts/provision-btree-gist.ps1`; it requires the database URL, administrator username, and secure administrator password, and intentionally does not grant any role-based privilege escalation.
 - Configuration: `application.yml`, `application-dev.yml`, and `application-prod.yml`
 - Required secrets and database properties are environment variables; see `.env.example`. `SUPER_ADMIN_BOOTSTRAP_ENABLED` defaults to `false`.
-- Spring Boot Actuator exposes health and info only.
+- Spring Boot Actuator exposes health and info publicly; metrics require a Super Admin token.
 
 ## Tests
 

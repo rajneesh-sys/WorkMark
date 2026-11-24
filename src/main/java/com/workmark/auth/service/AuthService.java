@@ -37,14 +37,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.UUID;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class AuthService {
-    private static final Logger log = LoggerFactory.getLogger(AuthService.class);
     private final CompanyRepository companies;
     private final UserAccountRepository users;
     private final PasswordEncoder passwordEncoder;
@@ -53,6 +48,7 @@ public class AuthService {
     private final EmployeeRepository employees;
     private final ActivationTokenService activationTokens;
     private final AccountTokenDelivery tokenDelivery;
+    private final AccountTokenOutbox tokenOutbox;
     private final LoginRateLimiter loginRateLimiter;
     private final PasswordResetRateLimiter passwordResetRateLimiter;
     private final PasswordPolicy passwordPolicy;
@@ -64,7 +60,8 @@ public class AuthService {
     public AuthService(CompanyRepository companies, UserAccountRepository users, PasswordEncoder passwordEncoder,
                        AuthenticationManager authenticationManager, JwtService jwtService,
                        EmployeeRepository employees, ActivationTokenService activationTokens,
-                       AccountTokenDelivery tokenDelivery, LoginRateLimiter loginRateLimiter,
+                       AccountTokenDelivery tokenDelivery, AccountTokenOutbox tokenOutbox,
+                       LoginRateLimiter loginRateLimiter,
                        PasswordResetRateLimiter passwordResetRateLimiter,
                        PasswordPolicy passwordPolicy, Clock clock,
                        @Value("${app.auth.password-reset-ttl:PT30M}") Duration passwordResetTtl,
@@ -78,6 +75,7 @@ public class AuthService {
         this.employees = employees;
         this.activationTokens = activationTokens;
         this.tokenDelivery = tokenDelivery;
+        this.tokenOutbox = tokenOutbox;
         this.loginRateLimiter = loginRateLimiter;
         this.passwordResetRateLimiter = passwordResetRateLimiter;
         this.passwordPolicy = passwordPolicy;
@@ -109,8 +107,7 @@ public class AuthService {
                 null, UserRole.COMPANY_ADMIN);
         user.requireActivation(token.hash(), token.expiresAt());
         users.save(user);
-        String exposedToken = tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
-                token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_SETUP);
+        String exposedToken = deliverOrEnqueue(user, token, AccountTokenDelivery.Purpose.PASSWORD_SETUP);
         return new CompanyOnboardingResponse(company.getId(), company.getCompanyName(), user.getId(),
                 user.getEmail(), exposedToken, exposedToken == null ? null : token.expiresAt());
     }
@@ -218,8 +215,7 @@ public class AuthService {
         account.setEmployeeId(employee.getId());
         account.requireActivation(token.hash(), token.expiresAt());
         users.save(account);
-        String exposedToken = tokenDelivery.deliver(account.getEmail(), account.getDisplayName(), token.value(),
-                token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_SETUP);
+        String exposedToken = deliverOrEnqueue(account, token, AccountTokenDelivery.Purpose.PASSWORD_SETUP);
         return new AccountInvitationResponse(new AuthResponse.UserView(account.getId(), companyId, employee.getId(),
                 account.getEmail(), account.getRole()), exposedToken, exposedToken == null ? null : token.expiresAt());
     }
@@ -263,8 +259,7 @@ public class AuthService {
         account.setEmployeeId(employeeId);
         account.requireActivation(token.hash(), token.expiresAt());
         users.save(account);
-        String exposedToken = tokenDelivery.deliver(account.getEmail(), account.getDisplayName(), token.value(),
-                token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_SETUP);
+        String exposedToken = deliverOrEnqueue(account, token, AccountTokenDelivery.Purpose.PASSWORD_SETUP);
         return new AccountInvitationResponse(new AuthResponse.UserView(account.getId(), companyId, employeeId,
                 account.getEmail(), account.getRole()), exposedToken, exposedToken == null ? null : token.expiresAt());
     }
@@ -308,29 +303,7 @@ public class AuthService {
         }
         ActivationTokenService.IssuedToken token = activationTokens.issue();
         user.requirePasswordReset(token.hash(), token.expiresAt(), now);
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            if (tokenDelivery.exposesDevelopmentToken()) {
-                String exposedToken = tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
-                        token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_RESET);
-                return new PasswordResetRequestResponse(exposedToken);
-            }
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    try {
-                        tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
-                                token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_RESET);
-                    } catch (RuntimeException exception) {
-                        log.error("Password-reset delivery failed for account {}", user.getId());
-                        clearPasswordResetToken(token.hash());
-                    }
-                }
-            });
-            return new PasswordResetRequestResponse(
-                    tokenDelivery.exposesDevelopmentToken() ? token.value() : null);
-        }
-        String exposedToken = tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
-                token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_RESET);
+        String exposedToken = deliverOrEnqueue(user, token, AccountTokenDelivery.Purpose.PASSWORD_RESET);
         return new PasswordResetRequestResponse(exposedToken);
     }
 
@@ -343,13 +316,6 @@ public class AuthService {
                 .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Password reset token is invalid or expired"));
         user.resetPassword(passwordEncoder.encode(request.newPassword()));
         passwordResetRateLimiter.recordSuccess(user.getEmail());
-    }
-
-    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
-    public void clearPasswordResetToken(String tokenHash) {
-        users.findForPasswordResetByTokenHash(tokenHash).ifPresent(user -> {
-            user.resetPasswordToken();
-        });
     }
 
     private void requireCompanyRole(UUID companyId, CurrentUser actor, UserRole... allowedRoles) {
@@ -369,5 +335,15 @@ public class AuthService {
     private AuthResponse.UserView view(CurrentUser user) {
         return new AuthResponse.UserView(user.getId(), user.getCompanyId(), user.getEmployeeId(),
                 user.getUsername(), user.getRole());
+    }
+
+    private String deliverOrEnqueue(UserAccount user, ActivationTokenService.IssuedToken token,
+                                    AccountTokenDelivery.Purpose purpose) {
+        if (tokenDelivery.exposesDevelopmentToken()) {
+            return tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
+                    token.expiresAt(), purpose);
+        }
+        tokenOutbox.enqueue(user.getEmail(), user.getDisplayName(), token.value(), token.expiresAt(), purpose);
+        return null;
     }
 }

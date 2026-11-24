@@ -26,6 +26,7 @@ public class PostgresPasswordResetRateLimiter implements PasswordResetRateLimite
     private final LoginRateLimitProperties properties;
     private final Clock clock;
     private final byte[] hmacKey;
+    private Instant nextCleanup = Instant.EPOCH;
 
     public PostgresPasswordResetRateLimiter(JdbcTemplate jdbc, PlatformTransactionManager transactionManager,
                                             LoginRateLimitProperties properties, Clock clock,
@@ -42,12 +43,23 @@ public class PostgresPasswordResetRateLimiter implements PasswordResetRateLimite
     public boolean isAllowed(String remoteAddress, String email) {
         cleanupExpired();
         Instant now = clock.instant();
-        for (String key : new String[]{keyHash("reset-ip:" + remoteAddress),
-                keyHash("reset-account:" + normalize(email))}) {
-            Timestamp blocked = jdbc.query(
+        String[] keys = {keyHash("reset-ip:" + remoteAddress),
+                keyHash("reset-account:" + normalize(email))};
+        int missingKeys = 0;
+        for (String key : keys) {
+            java.util.List<Instant> blockedUntil = jdbc.query(
                     "select blocked_until from password_reset_attempt_buckets where key_hash = ?",
-                    rs -> rs.next() && rs.getTimestamp(1) != null ? rs.getTimestamp(1) : null, key);
-            if (blocked != null && now.isBefore(blocked.toInstant())) return false;
+                    (rs, row) -> rs.getTimestamp(1) == null ? null : rs.getTimestamp(1).toInstant(), key);
+            if (blockedUntil.isEmpty()) {
+                missingKeys++;
+                continue;
+            }
+            if (blockedUntil.get(0) != null && now.isBefore(blockedUntil.get(0))) return false;
+        }
+        if (missingKeys > 0) {
+            Integer count = jdbc.queryForObject(
+                    "select count(*) from password_reset_attempt_buckets", Integer.class);
+            if (count != null && count + missingKeys > properties.getResetMaxTrackedKeys()) return false;
         }
         return true;
     }
@@ -56,6 +68,7 @@ public class PostgresPasswordResetRateLimiter implements PasswordResetRateLimite
     public void recordRequest(String remoteAddress, String email) {
         Instant now = clock.instant();
         transactions.executeWithoutResult(status -> {
+            cleanupExpired();
             recordKey(keyHash("reset-ip:" + remoteAddress), properties.getResetIpMaxFailures(), now);
             recordKey(keyHash("reset-account:" + normalize(email)), properties.getResetMaxFailures(), now);
         });
@@ -68,24 +81,20 @@ public class PostgresPasswordResetRateLimiter implements PasswordResetRateLimite
     }
 
     private void recordKey(String key, int threshold, Instant now) {
-        cleanupExpired();
-        Integer count = jdbc.queryForObject(
-                "select count(*) from password_reset_attempt_buckets", Integer.class);
-        Boolean existing = jdbc.queryForObject(
-                "select exists(select 1 from password_reset_attempt_buckets where key_hash = ?)",
+        Boolean exists = jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM password_reset_attempt_buckets WHERE key_hash = ?)",
                 Boolean.class, key);
-        if (!Boolean.TRUE.equals(existing)
-                && count != null
-                && count >= properties.getResetMaxTrackedKeys()) {
-            return;
+        if (!Boolean.TRUE.equals(exists)) {
+            Integer count = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM password_reset_attempt_buckets", Integer.class);
+            if (count == null || count >= properties.getResetMaxTrackedKeys()) return;
+            jdbc.update("""
+                    INSERT INTO password_reset_attempt_buckets
+                        (key_hash, failure_count, window_started_at, blocked_until, block_level, last_requested_at)
+                    VALUES (?, 0, ?, NULL, 0, ?)
+                    ON CONFLICT (key_hash) DO NOTHING
+                    """, key, Timestamp.from(now), Timestamp.from(now));
         }
-        jdbc.update("""
-                insert into password_reset_attempt_buckets
-                    (key_hash, failure_count, window_started_at, blocked_until, block_level, last_requested_at)
-                values (?, 0, ?, null, 0, ?)
-                on conflict (key_hash) do nothing
-                """, key, Timestamp.from(now), Timestamp.from(now));
-        jdbc.execute("select pg_advisory_xact_lock(" + (6288528922353146195L) + ")");
         java.util.List<Bucket> rows = jdbc.query(
                 "select failure_count, window_started_at, blocked_until, block_level "
                         + "from password_reset_attempt_buckets where key_hash = ? for update",
@@ -137,8 +146,9 @@ public class PostgresPasswordResetRateLimiter implements PasswordResetRateLimite
         }
     }
 
-    private void cleanupExpired() {
+    private synchronized void cleanupExpired() {
         Instant now = clock.instant();
+        if (now.isBefore(nextCleanup)) return;
         jdbc.update("""
                 delete from password_reset_attempt_buckets
                 where last_requested_at < ?
@@ -146,6 +156,7 @@ public class PostgresPasswordResetRateLimiter implements PasswordResetRateLimite
                 """,
                 Timestamp.from(now.minus(properties.getWindow().plus(properties.getMaxBlock()))),
                 Timestamp.from(now));
+        nextCleanup = now.plus(Duration.ofMinutes(1));
     }
 
     private Duration blockDuration(int level) {

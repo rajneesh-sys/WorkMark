@@ -48,4 +48,5 @@ public interface LeaveBalanceEntryRepository extends JpaRepository<LeaveBalanceE
             UUID companyId, UUID employeeId, Pageable pageable);
 
     boolean existsByLeaveRequestIdAndTransactionType(UUID leaveRequestId, LeaveTransactionType transactionType);
+    long countByLeaveRequestIdAndTransactionType(UUID leaveRequestId, LeaveTransactionType transactionType);
 }

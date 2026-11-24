@@ -4,6 +4,7 @@ import com.workmark.common.response.ApiResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -23,6 +24,12 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleApiException(ApiException exception) {
         return ResponseEntity.status(exception.getStatus())
                 .body(new ApiResponse<>(false, exception.getMessage(), null, java.time.Instant.now()));
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiResponse<Void>> handleAccessDenied(AccessDeniedException exception) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(new ApiResponse<>(false, "Access is forbidden", null, java.time.Instant.now()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

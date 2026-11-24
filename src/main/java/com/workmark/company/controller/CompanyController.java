@@ -67,8 +67,9 @@ public class CompanyController {
 
     @PatchMapping("/{id}/status")
     @Operation(summary = "Activate or deactivate a company")
-    @PreAuthorize("hasRole('SUPER_ADMIN') or (hasRole('COMPANY_ADMIN') and @currentTenant.companyId().equals(#id))")
+    @PreAuthorize("hasRole('SUPER_ADMIN')")
     public ApiResponse<CompanyView> setStatus(@PathVariable UUID id, @RequestParam CompanyStatus status) {
-        return ApiResponse.ok("Company status updated", companyService.setStatus(id, status));
+        return ApiResponse.ok("Company status updated",
+                companyService.setStatus(id, status, currentTenant.user()));
     }
 }

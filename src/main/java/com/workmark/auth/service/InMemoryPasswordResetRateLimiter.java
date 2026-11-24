@@ -45,6 +45,10 @@ public class InMemoryPasswordResetRateLimiter implements PasswordResetRateLimite
     @Override
     public synchronized void recordRequest(String remoteAddress, String email) {
         Instant now = clock.instant();
+        if (!now.isBefore(nextCleanup)) {
+            removeExpired(now);
+            nextCleanup = now.plus(java.time.Duration.ofMinutes(1));
+        }
         record(ipKey(remoteAddress), properties.getResetIpMaxFailures(), now);
         record(accountKey(email), properties.getResetMaxFailures(), now);
     }
@@ -61,12 +65,28 @@ public class InMemoryPasswordResetRateLimiter implements PasswordResetRateLimite
         Bucket bucket = buckets.computeIfAbsent(key, ignored -> new Bucket());
         if (bucket.blockedUntil != null && now.isBefore(bucket.blockedUntil)) return;
         if (bucket.blockedUntil != null) bucket.blockedUntil = null;
+        if (!now.isBefore(bucket.windowStartedAt.plus(properties.getWindow()))) {
+            bucket.failures = 0;
+            bucket.windowStartedAt = now;
+        }
         bucket.failures++;
         bucket.lastTouched = now;
         if (bucket.failures >= threshold) {
-            bucket.blockedUntil = now.plus(properties.getBaseBlock());
+            bucket.blockedUntil = now.plus(blockDuration(bucket.blockLevel));
             bucket.blockLevel++;
             bucket.failures = 0;
+            bucket.windowStartedAt = now;
+        }
+    }
+
+    private java.time.Duration blockDuration(int level) {
+        long multiplier = 1L << Math.min(level, 30);
+        try {
+            java.time.Duration duration = properties.getBaseBlock().multipliedBy(multiplier);
+            return duration.compareTo(properties.getMaxBlock()) > 0
+                    ? properties.getMaxBlock() : duration;
+        } catch (ArithmeticException exception) {
+            return properties.getMaxBlock();
         }
     }
 
@@ -83,7 +103,9 @@ public class InMemoryPasswordResetRateLimiter implements PasswordResetRateLimite
         while (iterator.hasNext()) {
             Bucket bucket = iterator.next().getValue();
             if (bucket.blockedUntil != null && now.isBefore(bucket.blockedUntil)) continue;
-            if (bucket.lastTouched.plus(properties.getWindow()).isBefore(now)) iterator.remove();
+            if (bucket.lastTouched.plus(properties.getWindow().plus(properties.getMaxBlock())).isBefore(now)) {
+                iterator.remove();
+            }
         }
     }
 
@@ -109,6 +131,7 @@ public class InMemoryPasswordResetRateLimiter implements PasswordResetRateLimite
         private int failures;
         private int blockLevel;
         private Instant blockedUntil;
+        private Instant windowStartedAt = Instant.EPOCH;
         private Instant lastTouched = Instant.EPOCH;
     }
 }

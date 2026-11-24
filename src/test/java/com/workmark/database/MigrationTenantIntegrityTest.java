@@ -1,6 +1,7 @@
 package com.workmark.database;
 
 import org.flywaydb.core.Flyway;
+import org.flywaydb.core.api.MigrationVersion;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -10,20 +11,22 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @Testcontainers(disabledWithoutDocker = true)
 class MigrationTenantIntegrityTest {
     @Container
     static final PostgreSQLContainer<?> POSTGRES =
-            new PostgreSQLContainer<>("postgres:17-alpine");
+            new PostgreSQLContainer<>("postgres:17-alpine").withInitScript("postgres-test-init.sql");
 
     @Test
     void leaveApproverConstraintIsTenantScopedAndAllowsNull() {
-        Flyway.configure()
+        Flyway existingDatabase = Flyway.configure()
                 .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
-                .load()
-                .migrate();
+                .target(MigrationVersion.fromVersion("11"))
+                .load();
+        existingDatabase.migrate();
 
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
                 POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
@@ -64,6 +67,16 @@ class MigrationTenantIntegrityTest {
                                            number_of_days, reason, status, approved_by, created_at, updated_at)
                 values (?, ?, ?, 'CASUAL', current_date, current_date, 1, 'pending', 'PENDING', null, now(), now())
                 """, leaveA, companyA, employeeA);
+
+        Flyway.configure()
+                .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+                .load()
+                .migrate();
+
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM companies", Integer.class));
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM user_accounts", Integer.class));
+        assertEquals(1, jdbc.queryForObject(
+                "SELECT COUNT(*) FROM leave_requests WHERE id = ? AND approved_by IS NULL", Integer.class, leaveA));
 
         jdbc.update("""
                 update leave_requests set approved_by = ?, status = 'APPROVED'

@@ -11,6 +11,7 @@ import com.workmark.attendance.entity.Attendance;
 import com.workmark.attendance.repository.AttendanceRepository;
 import com.workmark.company.repository.CompanyRepository;
 import com.workmark.company.entity.Company;
+import com.workmark.company.entity.CompanyStatus;
 import com.workmark.employee.entity.Employee;
 import com.workmark.employee.entity.EmployeeStatus;
 import com.workmark.employee.repository.EmployeeRepository;
@@ -24,6 +25,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -40,6 +42,10 @@ import java.util.UUID;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.util.Date;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.security.Keys;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,6 +65,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "app.bootstrap.super-admin.name=Integration Super Admin",
         "app.bootstrap.super-admin.email=integration-super@example.com",
         "app.bootstrap.super-admin.password=IntegrationSuperPassword123",
+        "app.auth.outbox.encryption-key=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
         "app.api-docs.public=false",
         "springdoc.api-docs.enabled=true",
         "springdoc.swagger-ui.enabled=true"
@@ -67,7 +74,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Testcontainers(disabledWithoutDocker = true)
 class CompanyOnboardingIntegrationTest {
     @Container
-    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
+    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine")
+            .withInitScript("postgres-test-init.sql");
 
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry registry) {
@@ -85,6 +93,7 @@ class CompanyOnboardingIntegrationTest {
     @Autowired AttendanceRepository attendances;
     @Autowired PasswordEncoder passwordEncoder;
     @Autowired SuperAdminBootstrapService bootstrapService;
+    @Autowired JdbcTemplate jdbc;
 
     @BeforeEach
     void ensureSuperAdminExists() {
@@ -165,7 +174,6 @@ class CompanyOnboardingIntegrationTest {
     }
 
     @Test
-    @WithMockUser(roles = "SUPER_ADMIN")
     void superAdminRegistersCompanyAndOneTimeAdminActivation() throws Exception {
         String companyEmail = "company-" + UUID.randomUUID() + "@example.com";
         String adminEmail = "admin-" + UUID.randomUUID() + "@example.com";
@@ -175,9 +183,12 @@ class CompanyOnboardingIntegrationTest {
                 "adminName", "First Admin",
                 "adminEmail", adminEmail));
 
+        String superAdminToken = login("integration-super@example.com",
+                "IntegrationSuperPassword123", "192.0.2.35");
         String response = mockMvc.perform(post("/api/v1/companies")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(request))
+                        .content(request)
+                        .header("Authorization", bearer(superAdminToken)))
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString();
         JsonNode data = objectMapper.readTree(response).get("data");
@@ -264,6 +275,8 @@ class CompanyOnboardingIntegrationTest {
                         .header("Authorization", bearer(managerToken)))
                 .andExpect(status().isNotFound());
         mockMvc.perform(post("/api/v1/leaves/{id}/approve", outsiderLeave.getId())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(java.util.Map.of("comment", "Unauthorized")))
                         .header("Authorization", bearer(managerToken)))
                 .andExpect(status().isNotFound());
         mockMvc.perform(post("/api/v1/leaves")
@@ -397,6 +410,101 @@ class CompanyOnboardingIntegrationTest {
         assertFalse(users.findById(employeeAccount.getId()).orElseThrow().isActive());
     }
 
+    @Test
+    void onlySuperAdminCanChangeCompanyStatusAndTransitionsAreAudited() throws Exception {
+        String suffix = UUID.randomUUID().toString();
+        Company company = company("lifecycle-" + suffix);
+        for (UserRole role : List.of(UserRole.COMPANY_ADMIN, UserRole.HR, UserRole.MANAGER, UserRole.EMPLOYEE)) {
+            UUID employeeId = null;
+            if (role == UserRole.MANAGER || role == UserRole.EMPLOYEE) {
+                Employee linkedEmployee = employeeRepository.save(
+                        employee(company.getId(), role.name() + "-" + suffix, null));
+                employeeId = linkedEmployee.getId();
+            }
+            UserAccount account = account(company.getId(), employeeId, role,
+                    role.name().toLowerCase() + "-" + suffix + "@example.com", "RolePassword123");
+            String token = login(account.getEmail(), "RolePassword123", "192.0.2.90");
+            mockMvc.perform(patch("/api/v1/companies/{id}/status", company.getId())
+                            .param("status", CompanyStatus.INACTIVE.name())
+                            .header("Authorization", bearer(token)))
+                    .andExpect(status().isForbidden());
+        }
+
+        String superAdminToken = login("integration-super@example.com",
+                "IntegrationSuperPassword123", "192.0.2.91");
+        mockMvc.perform(patch("/api/v1/companies/{id}/status", company.getId())
+                        .param("status", CompanyStatus.INACTIVE.name())
+                        .header("Authorization", bearer(superAdminToken)))
+                .andExpect(status().isOk());
+        assertEquals(1, jdbc.queryForObject(
+                "SELECT COUNT(*) FROM company_status_history WHERE company_id = ?", Integer.class, company.getId()));
+
+        mockMvc.perform(patch("/api/v1/companies/{id}/status", company.getId())
+                        .param("status", CompanyStatus.ACTIVE.name())
+                        .header("Authorization", bearer(superAdminToken)))
+                .andExpect(status().isOk());
+        assertEquals(2, jdbc.queryForObject(
+                "SELECT COUNT(*) FROM company_status_history WHERE company_id = ?", Integer.class, company.getId()));
+        assertEquals("ACTIVE", companies.findById(company.getId()).orElseThrow().getStatus().name());
+        assertThrows(org.springframework.dao.DataAccessException.class,
+                () -> jdbc.update("""
+                        UPDATE company_status_history
+                        SET new_status = 'INACTIVE'
+                        WHERE company_id = ?
+                        """, company.getId()));
+    }
+
+    @Test
+    void jwtRejectionsAreEnforcedAtTheHttpBoundary() throws Exception {
+        Company company = company("jwt-" + UUID.randomUUID());
+        UserAccount account = account(company.getId(), null, UserRole.HR,
+                "jwt-" + UUID.randomUUID() + "@example.com", "JwtPassword123");
+        String path = "/api/v1/auth/me";
+        int tokenVersion = account.getTokenVersion();
+
+        mockMvc.perform(get(path).header("Authorization", bearer(jwt(account, tokenVersion,
+                        Instant.now().plusSeconds(120), "workmark", "workmark-api", true, null))))
+                .andExpect(status().isOk());
+        assertUnauthorized(path, jwt(account, tokenVersion, Instant.now().plusSeconds(120),
+                "workmark", "workmark-api", false, null));
+        assertUnauthorized(path, jwt(account, tokenVersion + 1, Instant.now().plusSeconds(120),
+                "workmark", "workmark-api", true, null));
+        assertUnauthorized(path, jwt(account, tokenVersion, Instant.now().minusSeconds(1),
+                "workmark", "workmark-api", true, null));
+        assertUnauthorized(path, jwt(account, tokenVersion, Instant.now().plusSeconds(120),
+                "wrong-issuer", "workmark-api", true, null));
+        assertUnauthorized(path, jwt(account, tokenVersion, Instant.now().plusSeconds(120),
+                "workmark", "wrong-audience", true, null));
+        assertUnauthorized(path, jwt(account, tokenVersion, Instant.now().plusSeconds(120),
+                "workmark", "workmark-api", true, "wrong-signature-secret-with-at-least-32-bytes"));
+
+        company.setStatus(CompanyStatus.INACTIVE);
+        companies.save(company);
+        assertUnauthorized(path, jwt(account, tokenVersion, Instant.now().plusSeconds(120),
+                "workmark", "workmark-api", true, null));
+    }
+
+    @Test
+    void securityResponseHeadersArePresentOnHttpResponses() throws Exception {
+        mockMvc.perform(get("/actuator/health").secure(true))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("Content-Security-Policy", org.hamcrest.Matchers.containsString("frame-ancestors 'none'")))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("Permissions-Policy", org.hamcrest.Matchers.containsString("camera=()")))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("X-Content-Type-Options", "nosniff"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("X-Frame-Options", "DENY"));
+
+        mockMvc.perform(get("/actuator/metrics"))
+                .andExpect(status().isUnauthorized());
+        String superAdminToken = login("integration-super@example.com",
+                "IntegrationSuperPassword123", "192.0.2.92");
+        mockMvc.perform(get("/actuator/metrics").header("Authorization", bearer(superAdminToken)))
+                .andExpect(status().isOk());
+    }
+
     private UserAccount account(UUID companyId, UUID employeeId, UserRole role, String email, String password) {
         UserAccount account = new UserAccount(companyId, email, passwordEncoder.encode(password), role);
         account.setEmployeeId(employeeId);
@@ -430,6 +538,27 @@ class CompanyOnboardingIntegrationTest {
 
     private String bearer(String token) {
         return "Bearer " + token;
+    }
+
+    private void assertUnauthorized(String path, String token) throws Exception {
+        String response = mockMvc.perform(get(path).header("Authorization", bearer(token)))
+                .andExpect(status().isUnauthorized())
+                .andReturn().getResponse().getContentAsString();
+        assertFalse(response.contains(token));
+        assertFalse(response.contains("integration-test-jwt-secret"));
+    }
+
+    private String jwt(UserAccount account, int version, Instant expiresAt, String issuer, String audience,
+                       boolean includeVersion, String signingSecret) {
+        String secret = signingSecret == null
+                ? "integration-test-jwt-secret-with-more-than-32-characters" : signingSecret;
+        var builder = Jwts.builder().subject(account.getId().toString())
+                .issuedAt(Date.from(Instant.now().minusSeconds(5)))
+                .expiration(Date.from(expiresAt));
+        if (issuer != null) builder.issuer(issuer);
+        if (audience != null) builder.audience().add(audience).and();
+        if (includeVersion) builder.claim("ver", version);
+        return builder.signWith(Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8))).compact();
     }
 
     private String companyRequest() throws Exception {

@@ -17,7 +17,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics
   endpoint:
     health:
       probes:
@@ -40,6 +40,15 @@ app:
     activation-token-ttl: ${ACCOUNT_ACTIVATION_TTL:PT24H}
     password-reset-ttl: ${PASSWORD_RESET_TTL:PT30M}
     password-reset-cooldown: ${PASSWORD_RESET_COOLDOWN:PT60S}
+    outbox:
+      encryption-key: ${ACCOUNT_TOKEN_OUTBOX_KEY:}
+      poll-interval-ms: ${ACCOUNT_TOKEN_OUTBOX_POLL_INTERVAL_MS:10000}
+      batch-size: ${ACCOUNT_TOKEN_OUTBOX_BATCH_SIZE:20}
+      max-attempts: ${ACCOUNT_TOKEN_OUTBOX_MAX_ATTEMPTS:8}
+      base-retry-delay: ${ACCOUNT_TOKEN_OUTBOX_BASE_RETRY_DELAY:PT5S}
+      max-retry-delay: ${ACCOUNT_TOKEN_OUTBOX_MAX_RETRY_DELAY:PT1H}
+      processing-lease: ${ACCOUNT_TOKEN_OUTBOX_PROCESSING_LEASE:PT2M}
+      retention: ${ACCOUNT_TOKEN_OUTBOX_RETENTION:PT720H}
     login-rate-limit:
       max-failures: ${LOGIN_RATE_LIMIT_MAX_FAILURES:5}
       window: ${LOGIN_RATE_LIMIT_WINDOW:PT5M}

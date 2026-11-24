@@ -21,6 +21,7 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.header.writers.StaticHeadersWriter;
 import org.springframework.beans.factory.annotation.Value;
 
 import java.util.Arrays;
@@ -81,6 +82,14 @@ public class SecurityConfiguration {
                 .headers(headers -> headers
                         .frameOptions(frame -> frame.deny())
                         .contentTypeOptions(contentType -> {})
+                        .contentSecurityPolicy(csp -> csp.policyDirectives(
+                                "default-src 'self'; base-uri 'self'; object-src 'none'; "
+                                        + "frame-ancestors 'none'; form-action 'self'; "
+                                        + "script-src 'self' 'unsafe-inline'; "
+                                        + "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                                        + "font-src 'self' data:; connect-src 'self'"))
+                        .addHeaderWriter(new StaticHeadersWriter("Permissions-Policy",
+                                "camera=(), microphone=(), geolocation=(), payment=(), usb=()"))
                         .referrerPolicy(referrer -> referrer
                                 .policy(org.springframework.security.web.header.writers
                                         .ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER))
@@ -93,6 +102,8 @@ public class SecurityConfiguration {
                     auth.requestMatchers("/api/v1/auth/login", "/api/v1/auth/activate",
                             "/api/v1/auth/password-reset/request", "/api/v1/auth/password-reset/confirm",
                             "/actuator/health/**", "/actuator/info").permitAll();
+                    auth.requestMatchers("/actuator/metrics", "/actuator/metrics/**")
+                            .hasRole("SUPER_ADMIN");
                     if (swaggerPublic) {
                         auth.requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll();
                     }

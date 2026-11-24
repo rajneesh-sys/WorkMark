@@ -20,8 +20,10 @@ spring:
             enable: ${SMTP_STARTTLS:true}
             required: ${SMTP_STARTTLS_REQUIRED:true}
           ssl:
-            trust: ${SMTP_SSL_TRUST:}
             checkserveridentity: true
+          connectiontimeout: ${SMTP_CONNECTION_TIMEOUT_MS:10000}
+          timeout: ${SMTP_READ_TIMEOUT_MS:10000}
+          writetimeout: ${SMTP_WRITE_TIMEOUT_MS:10000}
   jpa:
     show-sql: false
 logging:

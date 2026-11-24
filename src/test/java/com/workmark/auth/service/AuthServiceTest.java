@@ -20,6 +20,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.ArgumentCaptor;
@@ -52,6 +53,12 @@ class AuthServiceTest {
     @Mock LoginRateLimiter loginRateLimiter;
     @Mock PasswordResetRateLimiter passwordResetRateLimiter;
     @Mock AccountTokenDelivery tokenDelivery;
+    @Mock AccountTokenOutbox tokenOutbox;
+
+    @BeforeEach
+    void exposeTokensInUnitTestMode() {
+        lenient().when(tokenDelivery.exposesDevelopmentToken()).thenReturn(true);
+    }
 
     @Test
     void companyRegistrationCreatesInactiveAdminWithHashedSetupToken() {
@@ -82,6 +89,28 @@ class AuthServiceTest {
         assertFalse(savedAdmin.isActive());
         verify(companies).save(any(Company.class));
         verify(jwtService, never()).issue(any());
+    }
+
+    @Test
+    void productionCompanyRegistrationPersistsMailWithoutReturningSetupToken() {
+        when(tokenDelivery.exposesDevelopmentToken()).thenReturn(false);
+        Instant expiry = Instant.parse("2026-11-23T00:00:00Z");
+        when(activationTokens.issue()).thenReturn(
+                new ActivationTokenService.IssuedToken("secret", "hashed", expiry));
+        when(companies.existsByEmailIgnoreCase("company@example.com")).thenReturn(false);
+        when(users.existsByEmailIgnoreCase("admin@example.com")).thenReturn(false);
+        when(companies.save(any(Company.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(users.save(any(UserAccount.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        CompanyOnboardingResponse response = service().registerCompany(superAdmin(), new CompanyRegistrationRequest(
+                "Acme", "company@example.com", null, null, "Admin User", "admin@example.com"));
+
+        assertNull(response.passwordSetupToken());
+        assertNull(response.passwordSetupExpiresAt());
+        verify(tokenOutbox).enqueue("admin@example.com", "Admin User", "secret", expiry,
+                AccountTokenDelivery.Purpose.PASSWORD_SETUP);
+        verify(tokenDelivery, never()).deliver(anyString(), anyString(), anyString(), any(),
+                any(AccountTokenDelivery.Purpose.class));
     }
 
     @Test
@@ -269,6 +298,27 @@ class AuthServiceTest {
         verify(activationTokens, times(1)).issue();
     }
 
+    @Test
+    void productionPasswordResetQueuesMailAndKeepsTheResponseGeneric() {
+        when(tokenDelivery.exposesDevelopmentToken()).thenReturn(false);
+        UserAccount account = new UserAccount(UUID.randomUUID(), "Admin", "admin@example.com",
+                "password-hash", UserRole.COMPANY_ADMIN);
+        Instant expiry = Instant.parse("2026-11-22T12:30:00Z");
+        when(passwordResetRateLimiter.isAllowed("192.0.2.20", "admin@example.com")).thenReturn(true);
+        when(users.findForUpdateByEmailIgnoreCase("admin@example.com"))
+                .thenReturn(java.util.Optional.of(account));
+        when(activationTokens.issue()).thenReturn(
+                new ActivationTokenService.IssuedToken("private-reset-token", "hashed-reset-token", expiry));
+
+        var response = service().requestPasswordReset("admin@example.com", "192.0.2.20");
+
+        assertNull(response.developmentToken());
+        verify(tokenOutbox).enqueue("admin@example.com", "Admin", "private-reset-token", expiry,
+                AccountTokenDelivery.Purpose.PASSWORD_RESET);
+        verify(tokenDelivery, never()).deliver(anyString(), anyString(), anyString(), any(),
+                any(AccountTokenDelivery.Purpose.class));
+    }
+
     private CurrentUser superAdmin() {
         return new CurrentUser(UUID.randomUUID(), null, null, "platform@example.com", "hash",
                 UserRole.SUPER_ADMIN, 0);
@@ -281,7 +331,7 @@ class AuthServiceTest {
 
     private AuthService service() {
         return new AuthService(companies, users, passwordEncoder, authenticationManager, jwtService,
-                employees, activationTokens, tokenDelivery, loginRateLimiter,
+                employees, activationTokens, tokenDelivery, tokenOutbox, loginRateLimiter,
                 passwordResetRateLimiter, new PasswordPolicy(),
                 Clock.fixed(Instant.parse("2026-11-22T12:00:00Z"), ZoneOffset.UTC),
                 java.time.Duration.ofMinutes(30),
