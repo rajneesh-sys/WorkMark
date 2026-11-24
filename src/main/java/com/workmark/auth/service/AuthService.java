@@ -39,6 +39,8 @@ import java.util.Locale;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class AuthService {
@@ -173,6 +175,26 @@ public class AuthService {
         user.invalidateTokens();
     }
 
+    @Transactional
+    public void reactivateAccount(UUID companyId, CurrentUser actor, UUID accountId) {
+        requireCompanyRole(companyId, actor, UserRole.COMPANY_ADMIN);
+        UserAccount account = users.findForUpdateByIdAndCompanyId(accountId, companyId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Account not found"));
+        if (account.getPasswordHash() == null || account.getActivationTokenHash() != null) {
+            throw new ApiException(HttpStatus.CONFLICT, "The account must have a usable setup state");
+        }
+        if (account.getEmployeeId() != null) {
+            Employee employee = employees.findForUpdateByIdAndCompanyId(account.getEmployeeId(), companyId)
+                    .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT,
+                            "The linked employee no longer exists"));
+            if (employee.getStatus() != com.workmark.employee.entity.EmployeeStatus.ACTIVE) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "Cannot reactivate an account for an inactive employee");
+            }
+        }
+        account.reactivate();
+    }
+
     public AuthResponse.UserView current(CurrentUser user) {
         return view(user);
     }
@@ -286,15 +308,29 @@ public class AuthService {
         }
         ActivationTokenService.IssuedToken token = activationTokens.issue();
         user.requirePasswordReset(token.hash(), token.expiresAt(), now);
-        String exposedToken;
-        try {
-            exposedToken = tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
-                    token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_RESET);
-        } catch (RuntimeException exception) {
-            log.error("Password-reset delivery failed for account {}",
-                    user.getId(), exception);
-            throw exception;
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            if (tokenDelivery.exposesDevelopmentToken()) {
+                String exposedToken = tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
+                        token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_RESET);
+                return new PasswordResetRequestResponse(exposedToken);
+            }
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    try {
+                        tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
+                                token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_RESET);
+                    } catch (RuntimeException exception) {
+                        log.error("Password-reset delivery failed for account {}", user.getId());
+                        clearPasswordResetToken(token.hash());
+                    }
+                }
+            });
+            return new PasswordResetRequestResponse(
+                    tokenDelivery.exposesDevelopmentToken() ? token.value() : null);
         }
+        String exposedToken = tokenDelivery.deliver(user.getEmail(), user.getDisplayName(), token.value(),
+                token.expiresAt(), AccountTokenDelivery.Purpose.PASSWORD_RESET);
         return new PasswordResetRequestResponse(exposedToken);
     }
 
@@ -307,6 +343,13 @@ public class AuthService {
                 .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Password reset token is invalid or expired"));
         user.resetPassword(passwordEncoder.encode(request.newPassword()));
         passwordResetRateLimiter.recordSuccess(user.getEmail());
+    }
+
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    public void clearPasswordResetToken(String tokenHash) {
+        users.findForPasswordResetByTokenHash(tokenHash).ifPresent(user -> {
+            user.resetPasswordToken();
+        });
     }
 
     private void requireCompanyRole(UUID companyId, CurrentUser actor, UserRole... allowedRoles) {

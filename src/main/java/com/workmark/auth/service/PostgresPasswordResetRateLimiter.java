@@ -40,6 +40,7 @@ public class PostgresPasswordResetRateLimiter implements PasswordResetRateLimite
 
     @Override
     public boolean isAllowed(String remoteAddress, String email) {
+        cleanupExpired();
         Instant now = clock.instant();
         for (String key : new String[]{keyHash("reset-ip:" + remoteAddress),
                 keyHash("reset-account:" + normalize(email))}) {
@@ -67,6 +68,17 @@ public class PostgresPasswordResetRateLimiter implements PasswordResetRateLimite
     }
 
     private void recordKey(String key, int threshold, Instant now) {
+        cleanupExpired();
+        Integer count = jdbc.queryForObject(
+                "select count(*) from password_reset_attempt_buckets", Integer.class);
+        Boolean existing = jdbc.queryForObject(
+                "select exists(select 1 from password_reset_attempt_buckets where key_hash = ?)",
+                Boolean.class, key);
+        if (!Boolean.TRUE.equals(existing)
+                && count != null
+                && count >= properties.getResetMaxTrackedKeys()) {
+            return;
+        }
         jdbc.update("""
                 insert into password_reset_attempt_buckets
                     (key_hash, failure_count, window_started_at, blocked_until, block_level, last_requested_at)
@@ -123,6 +135,17 @@ public class PostgresPasswordResetRateLimiter implements PasswordResetRateLimite
         } catch (GeneralSecurityException exception) {
             throw new IllegalStateException("HMAC-SHA-256 is unavailable", exception);
         }
+    }
+
+    private void cleanupExpired() {
+        Instant now = clock.instant();
+        jdbc.update("""
+                delete from password_reset_attempt_buckets
+                where last_requested_at < ?
+                  and (blocked_until is null or blocked_until <= ?)
+                """,
+                Timestamp.from(now.minus(properties.getWindow().plus(properties.getMaxBlock()))),
+                Timestamp.from(now));
     }
 
     private Duration blockDuration(int level) {

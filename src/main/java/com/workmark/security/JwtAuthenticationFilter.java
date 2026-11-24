@@ -39,7 +39,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             try {
                 Claims claims = jwtService.parse(header.substring(7));
                 CurrentUser user = userDetailsService.loadById(java.util.UUID.fromString(claims.getSubject()));
-                int tokenVersion = claims.get("ver", Integer.class);
+                Integer tokenVersion = claims.get("ver", Integer.class);
+                if (tokenVersion == null) {
+                    SecurityContextHolder.clearContext();
+                    chain.doFilter(request, response);
+                    return;
+                }
                 boolean tenantActive = user.getCompanyId() == null || companies.findById(user.getCompanyId())
                         .map(company -> company.getStatus() == CompanyStatus.ACTIVE).orElse(false);
                 if (tokenVersion == user.getTokenVersion() && tenantActive) {

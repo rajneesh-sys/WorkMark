@@ -34,9 +34,13 @@ import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.Set;
+import com.workmark.common.util.SortValidator;
 
 @Service
 public class LeaveLedgerService {
+    private static final Set<String> ALLOWED_SORT_FIELDS =
+            Set.of("effectiveAt", "transactionType", "leaveType", "deltaDays", "id");
     private final LeavePolicyRepository policies;
     private final LeaveBalanceEntryRepository entries;
     private final EmployeeRepository employees;
@@ -117,6 +121,7 @@ public class LeaveLedgerService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Page must be non-negative and size must be positive");
         }
         Sort sort = pageable.getSort().isSorted() ? pageable.getSort() : Sort.by("effectiveAt").descending();
+        SortValidator.validate(sort, ALLOWED_SORT_FIELDS, "leave ledger");
         if (sort.getOrderFor("id") == null) sort = sort.and(Sort.by("id").ascending());
         Pageable bounded = PageRequest.of(pageable.getPageNumber(), Math.min(pageable.getPageSize(), 100), sort);
         return entries.findAllByCompanyIdAndEmployeeIdOrderByEffectiveAtDesc(companyId, employee.getId(), bounded)
@@ -127,6 +132,8 @@ public class LeaveLedgerService {
     public void consume(UUID companyId, UUID employeeId, LeaveType leaveType, BigDecimal days,
                         UUID requestId, UUID actorId, String reason) {
         if (leaveType == LeaveType.UNPAID) return;
+        employees.findForUpdateByIdAndCompanyId(employeeId, companyId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Employee not found"));
         if (entries.existsByLeaveRequestIdAndTransactionType(requestId, LeaveTransactionType.CONSUMPTION)) {
             throw new ApiException(HttpStatus.CONFLICT, "Leave balance was already deducted for this request");
         }
@@ -143,6 +150,8 @@ public class LeaveLedgerService {
     public void restore(UUID companyId, UUID employeeId, LeaveType leaveType, BigDecimal days,
                         UUID requestId, UUID actorId, String reason) {
         if (leaveType == LeaveType.UNPAID) return;
+        employees.findForUpdateByIdAndCompanyId(employeeId, companyId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Employee not found"));
         if (entries.existsByLeaveRequestIdAndTransactionType(requestId, LeaveTransactionType.RESTORATION)) {
             throw new ApiException(HttpStatus.CONFLICT, "Leave balance was already restored for this request");
         }

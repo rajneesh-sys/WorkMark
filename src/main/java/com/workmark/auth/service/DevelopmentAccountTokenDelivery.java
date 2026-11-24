@@ -12,4 +12,7 @@ public class DevelopmentAccountTokenDelivery implements AccountTokenDelivery {
     public String deliver(String recipient, String displayName, String token, Instant expiresAt, Purpose purpose) {
         return token;
     }
+
+    @Override
+    public boolean exposesDevelopmentToken() { return true; }
 }

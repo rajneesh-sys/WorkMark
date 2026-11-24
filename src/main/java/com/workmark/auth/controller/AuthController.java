@@ -21,11 +21,13 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import jakarta.servlet.http.HttpServletRequest;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/auth")
@@ -103,6 +105,14 @@ public class AuthController {
             @Valid @RequestBody CreateCompanyAccountRequest request) {
         return ApiResponse.ok("Company account created",
                 authService.createCompanyAccount(currentTenant.companyId(), currentTenant.user(), request));
+    }
+
+    @PostMapping("/accounts/{accountId}/reactivate")
+    @PreAuthorize("hasRole('COMPANY_ADMIN')")
+    @Operation(summary = "Explicitly reactivate a company account after the account lifecycle has been reviewed")
+    public ApiResponse<Void> reactivateAccount(@PathVariable UUID accountId) {
+        authService.reactivateAccount(currentTenant.companyId(), currentTenant.user(), accountId);
+        return ApiResponse.ok("Account reactivated", null);
     }
 
     @PostMapping("/password")

@@ -33,9 +33,15 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
+import java.util.Set;
+import com.workmark.common.util.SortValidator;
 
 @Service
 public class LeaveService {
+    private static final Set<String> ALLOWED_LEAVE_SORT_FIELDS =
+            Set.of("startDate", "endDate", "numberOfDays", "status", "createdAt", "id");
+    private static final Set<String> ALLOWED_HISTORY_SORT_FIELDS =
+            Set.of("actionAt", "action", "previousStatus", "newStatus", "id");
     private final LeaveRequestRepository leaveRequests;
     private final LeaveStatusHistoryRepository statusHistory;
     private final EmployeeAccessPolicy accessPolicy;
@@ -227,6 +233,10 @@ public class LeaveService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Page must be non-negative and size must be positive");
         }
         Sort sort = pageable.getSort().isSorted() ? pageable.getSort() : defaultSort;
+        SortValidator.validate(sort,
+                defaultSort.getOrderFor("actionAt") != null
+                        ? ALLOWED_HISTORY_SORT_FIELDS : ALLOWED_LEAVE_SORT_FIELDS,
+                "leave");
         if (sort.getOrderFor("id") == null) sort = sort.and(Sort.by("id").ascending());
         return PageRequest.of(pageable.getPageNumber(), Math.min(pageable.getPageSize(), 100),
                 sort);

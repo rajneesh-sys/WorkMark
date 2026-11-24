@@ -74,6 +74,10 @@ public class UserAccount extends AuditedEntity {
     public boolean isActive() { return active; }
     public int getTokenVersion() { return tokenVersion; }
     public void invalidateTokens() { tokenVersion++; }
+    public void reactivate() {
+        active = true;
+        invalidateTokens();
+    }
     public void deactivate() {
         if (active) {
             active = false;
@@ -107,6 +111,12 @@ public class UserAccount extends AuditedEntity {
     }
     public void resetPassword(String encodedPassword) {
         changePassword(encodedPassword);
+        passwordResetTokenHash = null;
+        passwordResetExpiresAt = null;
+        passwordResetRequestedAt = null;
+    }
+
+    public void resetPasswordToken() {
         passwordResetTokenHash = null;
         passwordResetExpiresAt = null;
         passwordResetRequestedAt = null;

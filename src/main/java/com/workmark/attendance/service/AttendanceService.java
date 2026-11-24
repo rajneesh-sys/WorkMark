@@ -27,6 +27,8 @@ import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.List;
 import java.util.UUID;
+import java.util.Set;
+import com.workmark.common.util.SortValidator;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -34,6 +36,11 @@ import org.springframework.data.domain.Sort;
 
 @Service
 public class AttendanceService {
+    private static final Set<String> ALLOWED_SORT_FIELDS =
+            Set.of("attendanceDate", "employeeId", "status", "checkInTime", "checkOutTime",
+                    "totalWorkingMinutes", "id");
+    private static final Set<String> ALLOWED_CORRECTION_SORT_FIELDS =
+            Set.of("correctedAt", "attendanceId", "employeeId", "correctedStatus", "id");
     private final AttendanceRepository attendance;
     private final AttendanceCorrectionRepository corrections;
     private final EmployeeAccessPolicy accessPolicy;
@@ -237,6 +244,10 @@ public class AttendanceService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Page must be non-negative and size must be positive");
         }
         Sort sort = pageable.getSort().isSorted() ? pageable.getSort() : defaultSort;
+        SortValidator.validate(sort,
+                defaultSort.getOrderFor("correctedAt") != null
+                        ? ALLOWED_CORRECTION_SORT_FIELDS : ALLOWED_SORT_FIELDS,
+                "attendance");
         if (sort.getOrderFor("id") == null) {
             sort = sort.and(Sort.by("id").ascending());
         }

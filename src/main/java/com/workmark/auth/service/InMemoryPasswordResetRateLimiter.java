@@ -32,6 +32,13 @@ public class InMemoryPasswordResetRateLimiter implements PasswordResetRateLimite
             removeExpired(now);
             nextCleanup = now.plus(java.time.Duration.ofMinutes(1));
         }
+        String ipKey = ipKey(remoteAddress);
+        String accountKey = accountKey(email);
+        int newKeys = (buckets.containsKey(ipKey) ? 0 : 1)
+                + (buckets.containsKey(accountKey) ? 0 : 1);
+        if (buckets.size() + newKeys > properties.getResetMaxTrackedKeys()) {
+            return false;
+        }
         return !blocked(ipKey(remoteAddress), now) && !blocked(accountKey(email), now);
     }
 
@@ -48,6 +55,9 @@ public class InMemoryPasswordResetRateLimiter implements PasswordResetRateLimite
     }
 
     private void record(String key, int threshold, Instant now) {
+        if (!buckets.containsKey(key) && buckets.size() >= properties.getResetMaxTrackedKeys()) {
+            return;
+        }
         Bucket bucket = buckets.computeIfAbsent(key, ignored -> new Bucket());
         if (bucket.blockedUntil != null && now.isBefore(bucket.blockedUntil)) return;
         if (bucket.blockedUntil != null) bucket.blockedUntil = null;

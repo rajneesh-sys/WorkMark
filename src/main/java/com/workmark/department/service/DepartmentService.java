@@ -16,9 +16,13 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.Set;
+import com.workmark.common.util.SortValidator;
 
 @Service
 public class DepartmentService {
+    private static final Set<String> ALLOWED_SORT_FIELDS =
+            Set.of("departmentName", "status", "createdAt", "id");
     private final DepartmentRepository departments;
     private final EmployeeRepository employees;
 
@@ -55,6 +59,7 @@ public class DepartmentService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Page must be non-negative and size must be positive");
         }
         Sort sort = pageable.getSort().isSorted() ? pageable.getSort() : Sort.by("departmentName").ascending();
+        SortValidator.validate(sort, ALLOWED_SORT_FIELDS, "department");
         if (sort.getOrderFor("id") == null) sort = sort.and(Sort.by("id").ascending());
         Pageable bounded = PageRequest.of(pageable.getPageNumber(), Math.min(pageable.getPageSize(), 100), sort);
         return departments.findAllByCompanyId(companyId, bounded).map(this::view);
