@@ -49,7 +49,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
         "app.auth.outbox.base-retry-delay=PT1S",
         "app.auth.outbox.max-retry-delay=PT10S"
 })
-@Testcontainers(disabledWithoutDocker = true)
+@Testcontainers
 class PostgresAccountTokenOutboxIntegrationTest {
     private static final String TOKEN = "private-one-time-token-never-store-plaintext";
     private static final String KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";

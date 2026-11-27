@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         "app.auth.login-rate-limit.reset-ip-max-failures=1000",
         "app.auth.login-rate-limit.reset-max-tracked-keys=10000"
 })
-@Testcontainers(disabledWithoutDocker = true)
+@Testcontainers
 class PostgresPasswordResetRateLimiterIntegrationTest {
     private static final String SECRET = "reset-limiter-integration-secret-with-more-than-32-characters";
     private static final long PREVIOUS_GLOBAL_LOCK_KEY = 6288528922353146195L;

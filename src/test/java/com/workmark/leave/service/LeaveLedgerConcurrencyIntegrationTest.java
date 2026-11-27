@@ -45,7 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(properties = "app.jwt.secret=leave-concurrency-integration-secret-with-more-than-32-characters")
-@Testcontainers(disabledWithoutDocker = true)
+@Testcontainers
 class LeaveLedgerConcurrencyIntegrationTest {
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine")

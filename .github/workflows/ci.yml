@@ -33,9 +33,31 @@ jobs:
           fi
           git diff --check "$base" HEAD
       - name: Verify Docker is available for Testcontainers
-        run: docker info
+        shell: bash
+        run: |
+          echo "Docker context: $(docker context show)"
+          if [[ ! -S /var/run/docker.sock ]]; then
+            echo "::error::Docker socket /var/run/docker.sock is missing or is not a Unix socket"
+            exit 1
+          fi
+          ls -l /var/run/docker.sock
+          export DOCKER_HOST=unix:///var/run/docker.sock
+          echo "DOCKER_HOST=$DOCKER_HOST" >> "$GITHUB_ENV"
+          docker --host "$DOCKER_HOST" version
       - name: Build and run all unit and integration tests
+        env:
+          # Testcontainers 1.21.3 otherwise defaults to API 1.32, rejected by Docker 29.
+          JAVA_TOOL_OPTIONS: -Dapi.version=1.44
         run: ./gradlew clean test build --no-daemon
+      - name: Report Testcontainers diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          echo "Testcontainers provider messages from test reports:"
+          if [[ -d build/test-results/test ]]; then
+            grep -hiE 'DockerClientProviderStrategy|Could not find a valid Docker environment|client version .*too old|minimum supported API version' build/test-results/test/TEST-*.xml || true
+          fi
+          echo "See the uploaded test reports for complete failure details."
       - name: Require PostgreSQL integration tests to run
         shell: bash
         run: |
@@ -44,24 +66,31 @@ jobs:
           import sys
           import xml.etree.ElementTree as ET
 
-          suites = [
-              "com.workmark.database.MigrationTenantIntegrityTest",
-              "com.workmark.auth.service.PostgresAccountTokenOutboxIntegrationTest",
-              "com.workmark.auth.service.PostgresPasswordResetRateLimiterIntegrationTest",
-              "com.workmark.company.CompanyOnboardingIntegrationTest",
-              "com.workmark.leave.service.LeaveLedgerConcurrencyIntegrationTest",
-          ]
+          suites = {
+              "com.workmark.database.MigrationTenantIntegrityTest": 2,
+              "com.workmark.auth.service.PostgresAccountTokenOutboxIntegrationTest": 5,
+              "com.workmark.auth.service.PostgresPasswordResetRateLimiterIntegrationTest": 2,
+              "com.workmark.company.CompanyOnboardingIntegrationTest": 11,
+              "com.workmark.leave.service.LeaveLedgerConcurrencyIntegrationTest": 5,
+          }
           errors = []
-          for suite in suites:
+          total = 0
+          for suite, minimum in suites.items():
               report = pathlib.Path("build/test-results/test") / f"TEST-{suite}.xml"
               if not report.exists():
                   errors.append(f"{suite}: test report missing")
                   continue
               root = ET.parse(report).getroot()
-              if int(root.get("tests", "0")) == 0 or int(root.get("skipped", "0")) != 0:
-                  errors.append(f"{suite}: no tests ran or tests were skipped")
+              tests = int(root.get("tests", "0"))
+              skipped = int(root.get("skipped", "0"))
+              failures = int(root.get("failures", "0")) + int(root.get("errors", "0"))
+              total += tests
+              print(f"{suite}: {tests} tests, {skipped} skipped, {failures} failures/errors")
+              if tests < minimum or skipped != 0 or failures != 0:
+                  errors.append(f"{suite}: expected at least {minimum} tests, zero skips and zero failures/errors")
           if errors:
               sys.exit("PostgreSQL integration tests did not fully run:\n" + "\n".join(errors))
+          print(f"PostgreSQL integration tests passed: {total}")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
