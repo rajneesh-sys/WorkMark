@@ -86,6 +86,8 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: gradle
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
       - name: Scan runtime dependencies for known vulnerabilities
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
