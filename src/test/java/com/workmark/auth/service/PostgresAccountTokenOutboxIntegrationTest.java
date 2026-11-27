@@ -157,6 +157,8 @@ class PostgresAccountTokenOutboxIntegrationTest {
         UUID expiredId = latestId();
         outbox.processPendingBatch();
         assertEquals("EXPIRED", status(expiredId));
+        assertNull(jdbc.queryForObject(
+                "SELECT payload_ciphertext FROM account_token_outbox WHERE id = ?", byte[].class, expiredId));
         verifyNoInteractions(delivery);
 
         enqueue(TOKEN, clock.instant().plusSeconds(600));

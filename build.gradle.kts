@@ -2,6 +2,7 @@ plugins {
     java
     id("org.springframework.boot") version "3.5.6"
     id("io.spring.dependency-management") version "1.1.7"
+    id("org.owasp.dependencycheck") version "12.2.2"
 }
 
 group = "com.workmark"
@@ -45,4 +46,9 @@ tasks.withType<Test> {
 
 tasks.bootJar {
     archiveFileName.set("workmark-app.jar")
+}
+
+dependencyCheck {
+    scanConfigurations = listOf("runtimeClasspath")
+    nvd.apiKey = System.getenv("NVD_API_KEY")
 }

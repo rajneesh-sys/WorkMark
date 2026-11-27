@@ -12,22 +12,125 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
           cache: gradle
-      - name: Compile
-        run: ./gradlew classes testClasses --no-daemon
-      - name: Unit and integration tests
-        run: ./gradlew test --no-daemon
-      - name: Build application
-        run: ./gradlew bootJar --no-daemon
-      - name: Build Docker image
-        run: docker build -t workmark:${{ github.sha }} .
-      - name: Dependency vulnerability scan
-        uses: dependency-check/Dependency-Check_Action@main
+      - name: Check whitespace
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base="${PR_BASE:-$PUSH_BEFORE}"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git hash-object -t tree /dev/null)"
+          fi
+          git diff --check "$base" HEAD
+      - name: Verify Docker is available for Testcontainers
+        run: docker info
+      - name: Build and run all unit and integration tests
+        run: ./gradlew clean test build --no-daemon
+      - name: Require PostgreSQL integration tests to run
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import sys
+          import xml.etree.ElementTree as ET
+
+          suites = [
+              "com.workmark.database.MigrationTenantIntegrityTest",
+              "com.workmark.auth.service.PostgresAccountTokenOutboxIntegrationTest",
+              "com.workmark.auth.service.PostgresPasswordResetRateLimiterIntegrationTest",
+              "com.workmark.company.CompanyOnboardingIntegrationTest",
+              "com.workmark.leave.service.LeaveLedgerConcurrencyIntegrationTest",
+          ]
+          errors = []
+          for suite in suites:
+              report = pathlib.Path("build/test-results/test") / f"TEST-{suite}.xml"
+              if not report.exists():
+                  errors.append(f"{suite}: test report missing")
+                  continue
+              root = ET.parse(report).getroot()
+              if int(root.get("tests", "0")) == 0 or int(root.get("skipped", "0")) != 0:
+                  errors.append(f"{suite}: no tests ran or tests were skipped")
+          if errors:
+              sys.exit("PostgreSQL integration tests did not fully run:\n" + "\n".join(errors))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          project: WorkMark
-          path: .
-          format: 'HTML'
+          name: test-reports
+          path: |
+            build/reports/tests/
+            build/test-results/test/
+          if-no-files-found: warn
+      - uses: docker/setup-buildx-action@v3
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: workmark:ci
+
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Scan runtime dependencies for known vulnerabilities
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: ./gradlew dependencyCheckAnalyze --no-daemon
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-check-report
+          path: build/reports/dependency-check-report.html
+          if-no-files-found: warn
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.ENABLE_GHCR_PUBLISH == 'true'
+    needs: [build-test, dependency-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare image tags
+        id: image
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo 'tags<<EOF'
+            echo "${image}:sha-${GITHUB_SHA}"
+            while IFS= read -r tag; do
+              if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] && ((${#tag} <= 128)); then
+                echo "${image}:${tag}"
+              fi
+            done < <(git tag --points-at HEAD)
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish image from main
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.tags }}

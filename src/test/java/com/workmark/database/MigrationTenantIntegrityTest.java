@@ -12,13 +12,27 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Testcontainers(disabledWithoutDocker = true)
 class MigrationTenantIntegrityTest {
     @Container
     static final PostgreSQLContainer<?> POSTGRES =
-            new PostgreSQLContainer<>("postgres:17-alpine").withInitScript("postgres-test-init.sql");
+            new PostgreSQLContainer<>("postgres:15-alpine").withInitScript("postgres-test-init.sql");
+
+    @Test
+    void freshDatabaseMigratesToCurrentVersion() {
+        Flyway flyway = Flyway.configure()
+                .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+                .schemas("fresh_install")
+                .load();
+        flyway.migrate();
+
+        assertNotNull(flyway.info().current());
+        assertEquals(0, flyway.info().pending().length);
+    }
 
     @Test
     void leaveApproverConstraintIsTenantScopedAndAllowsNull() {
@@ -27,6 +41,7 @@ class MigrationTenantIntegrityTest {
                 .target(MigrationVersion.fromVersion("11"))
                 .load();
         existingDatabase.migrate();
+        assertEquals(MigrationVersion.fromVersion("11"), existingDatabase.info().current().getVersion());
 
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
                 POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
@@ -68,11 +83,13 @@ class MigrationTenantIntegrityTest {
                 values (?, ?, ?, 'CASUAL', current_date, current_date, 1, 'pending', 'PENDING', null, now(), now())
                 """, leaveA, companyA, employeeA);
 
-        Flyway.configure()
+        Flyway upgradedDatabase = Flyway.configure()
                 .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
-                .load()
-                .migrate();
+                .load();
+        upgradedDatabase.migrate();
 
+        assertTrue(upgradedDatabase.info().current().getVersion().compareTo(MigrationVersion.fromVersion("11")) > 0);
+        assertEquals(0, upgradedDatabase.info().pending().length);
         assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM companies", Integer.class));
         assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM user_accounts", Integer.class));
         assertEquals(1, jdbc.queryForObject(
