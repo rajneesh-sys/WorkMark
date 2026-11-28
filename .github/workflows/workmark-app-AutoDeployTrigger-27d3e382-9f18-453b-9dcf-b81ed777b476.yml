@@ -1,0 +1,49 @@
+name: Trigger auto deployment for workmark-app
+
+# When this action will be executed
+on:
+  # Automatically trigger it when detected changes in repo
+  push:
+    branches: 
+      [ main ]
+    paths:
+    - '**'
+    - '.github/workflows/workmark-app-AutoDeployTrigger-27d3e382-9f18-453b-9dcf-b81ed777b476.yml'
+
+  # Allow manual trigger 
+  workflow_dispatch:      
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions: 
+      id-token: write #This is required for requesting the OIDC JWT Token
+      contents: read #Required when GH token is used to authenticate with private repo
+
+    steps:
+      - name: Checkout to the branch
+        uses: actions/checkout@v2
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.WORKMARKAPP_AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.WORKMARKAPP_AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.WORKMARKAPP_AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push container image to registry
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          appSourcePath: ${{ github.workspace }}
+          _dockerfilePathKey_: _dockerfilePath_
+          _targetLabelKey_: _targetLabel_
+          registryUrl: workmarkcontainregistry.azurecr.io
+          registryUsername: ${{ secrets.WORKMARKAPP_REGISTRY_USERNAME }}
+          registryPassword: ${{ secrets.WORKMARKAPP_REGISTRY_PASSWORD }}
+          containerAppName: workmark-app
+          resourceGroup: workmark-rg
+          imageToBuild: workmarkcontainregistry.azurecr.io/workmark-app:${{ github.sha }}
+          _buildArgumentsKey_: |
+            _buildArgumentsValues_
+
+
